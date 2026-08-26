@@ -19,6 +19,8 @@ LIBRERIAS_REQUERIDAS = {
 }
 
 def verificar_e_instalar_librerias():
+    if getattr(sys, 'frozen', False):
+        return
     for import_name, pip_name in LIBRERIAS_REQUERIDAS.items():
         try:
             __import__(import_name)
@@ -39,6 +41,7 @@ from tkinter import messagebox, filedialog
 import customtkinter as ctk
 import pyodbc
 import psycopg2
+import multiprocessing
 
 # ==========================================
 # 2. GESTIÓN DE CONFIGURACIÓN (JSON COMPARTIDO)
@@ -469,5 +472,6 @@ class AplicacionCargas(ctk.CTk):
         return fila_procesada
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     app = AplicacionCargas()
     app.mainloop()
