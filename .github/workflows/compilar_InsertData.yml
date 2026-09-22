@@ -1,4 +1,4 @@
-name: Compilar y Subir InsertDAta.exe
+name: Compilar y Subir InsertData.exe
 
 on:
   push:
@@ -34,4 +34,4 @@ jobs:
         GH_TOKEN: ${{ secrets.TOKEN_EJECUTABLES }}
       run: |
         # Sube el ejecutable al repositorio central de Ejecutables en el tag 'produccion'
-        gh release upload Produccion dist/InsertDAta.exe --repo idwin1/Ejecutables --clobber
+        gh release upload Produccion dist/InsertData.exe --repo idwin1/Ejecutables --clobber
