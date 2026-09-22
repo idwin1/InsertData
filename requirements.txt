@@ -1,0 +1,5 @@
+colorama   
+customtkinter
+pyodbc   
+psycopg2-binary   
+pillow  
