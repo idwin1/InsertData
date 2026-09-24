@@ -32,6 +32,11 @@ jobs:
     - name: Subir archivo a Ejecutables
       env:
         GH_TOKEN: ${{ secrets.TOKEN_EJECUTABLES }}
+      shell: bash
       run: |
-        # Sube el ejecutable al repositorio central de Ejecutables en el tag 'produccion'
+        # 1. Eliminamos el ejecutable anterior si existe. 
+        # El "|| true" evita que la acción falle si es la primera vez y el archivo no existe aún.
+        gh release delete-asset Produccion "InsertData.exe" --repo idwin1/Ejecutables -y || true
+        
+        # 2. Subimos el ejecutable recién compilado
         gh release upload Produccion dist/InsertData.exe --repo idwin1/Ejecutables --clobber
