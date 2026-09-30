@@ -95,6 +95,8 @@ def cargar_relaciones():
     except Exception:
         return {}
 
+    
+
 def guardar_relaciones(datos):
     try:
         with open(RELACIONES_FILE, "w", encoding="utf-8") as f:
@@ -102,8 +104,193 @@ def guardar_relaciones(datos):
     except Exception as e:
         print(f"Error al guardar relaciones: {e}")
 
+def migrar_estructura_json():
+    memoria = cargar_relaciones()
+    cambios = False
+    
+    for db_name, contenido in memoria.items():
+        if "_configuracion_global" not in contenido:
+            viejo_contenido = contenido.copy()
+            memoria[db_name] = {
+                "_configuracion_global": {
+                    "orden_ejecucion": [],
+                    "volumen_registros": {},
+                    "modo_tablas": {} # NUEVO: Guardará si es "Generar" o "Solo Lectura"
+                },
+                "tablas": viejo_contenido
+            }
+            cambios = True
+            
+    if cambios:
+        guardar_relaciones(memoria)
+        print("✅ Archivo relaciones.json migrado a la estructura de Orquestador con Modos de Lectura.")
+
+migrar_estructura_json()
+
+# =========================================================
+# 3. Class ToolTip: para agregar mensajes emergentes a cualquier widget de Tkinter
+# =========================================================
+class ToolTip:
+    def __init__(self, widget, text, delay=600):
+        self.widget = widget
+        self.text = text
+        self.delay = delay  # Tiempo en milisegundos (600ms = 0.6 segundos)
+        self.tooltip_window = None
+        self.timer_id = None
+        
+        try:
+            self.widget.bind("<Enter>", self.al_entrar)
+            self.widget.bind("<Leave>", self.al_salir)
+            self.widget.bind("<ButtonPress>", self.al_salir)
+        except NotImplementedError:
+            # Si el widget (como CTkSegmentedButton) bloquea el .bind(),
+            # lo vinculamos directamente a su lienzo (_canvas) interno.
+            if hasattr(self.widget, "_canvas"):
+                self.widget._canvas.bind("<Enter>", self.al_entrar)
+                self.widget._canvas.bind("<Leave>", self.al_salir)
+                self.widget._canvas.bind("<ButtonPress>", self.al_salir)
+
+    def al_entrar(self, event=None):
+        self.cancelar_temporizador() # Asegura que no haya duplicados
+        # Programa la aparición de la ventana después de 'delay' milisegundos
+        self.timer_id = self.widget.after(self.delay, self.mostrar_tooltip)
+
+    def al_salir(self, event=None):
+        self.cancelar_temporizador()
+        self.ocultar_tooltip()
+
+    def cancelar_temporizador(self):
+        if self.timer_id:
+            self.widget.after_cancel(self.timer_id)
+            self.timer_id = None
+
+    def mostrar_tooltip(self):
+        if self.tooltip_window:
+            return
+            
+        self.tooltip_window = tk.Toplevel(self.widget)
+        self.tooltip_window.wm_overrideredirect(True)
+        
+        # 1. TRUCO DE TRANSPARENCIA MEJORADO
+        # Usamos un negro casi puro ("#000001") en lugar de magenta para 
+        # que el suavizado de bordes se funda con el tema oscuro sin dejar rastro.
+        color_invisible = "#000001"
+        self.tooltip_window.configure(bg=color_invisible)
+        self.tooltip_window.wm_attributes("-transparentcolor", color_invisible)
+
+        # 2. CONTENEDOR CON BORDES REDONDEADOS
+        frame_tooltip = ctk.CTkFrame(self.tooltip_window, 
+                                     fg_color="#1e293b",       
+                                     corner_radius=10,         
+                                     border_width=1,           
+                                     border_color="#3b82f6")   
+        frame_tooltip.pack(padx=2, pady=2) 
+
+        # 3. TEXTO
+        label = ctk.CTkLabel(frame_tooltip, 
+                             text=self.text, 
+                             text_color="white",
+                             fg_color="transparent",
+                             font=("Segoe UI", 12),
+                             wraplength=250, 
+                             justify="left")
+        label.pack(padx=12, pady=8)
+
+        # 4. OBTENER TAMAÑO SOLICITADO
+        self.tooltip_window.update_idletasks() 
+        ancho_tooltip = frame_tooltip.winfo_reqwidth()
+        alto_tooltip = frame_tooltip.winfo_reqheight()
+        
+        ancho_pantalla = self.widget.winfo_screenwidth()
+        alto_pantalla = self.widget.winfo_screenheight()
+        
+        # 5. POSICIÓN (Centrado y ABAJO del componente)
+        x = int(self.widget.winfo_rootx() + (self.widget.winfo_width() / 2) - (ancho_tooltip / 2))
+        y = int(self.widget.winfo_rooty() + self.widget.winfo_height() + 10)
+        
+        # 6. CORRECCIÓN DE BORDES
+        # Evitar que se salga por los lados
+        if x < 0:
+            x = 10
+        elif (x + ancho_tooltip) > ancho_pantalla:
+            x = ancho_pantalla - ancho_tooltip - 10
+            
+        # Evitar que se salga por abajo (si topa abajo, lo pasa para arriba)
+        if (y + alto_tooltip) > alto_pantalla: 
+            y = int(self.widget.winfo_rooty() - alto_tooltip - 10)
+            
+        self.tooltip_window.wm_geometry(f"+{x}+{y}")
+    
+    def ocultar_tooltip(self):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+# =========================================================
+# 4 Class DialogoModerno: Alertas y confirmaciones personalizadas
+# =========================================================
+class DialogoModerno(ctk.CTkToplevel):
+    def __init__(self, master, titulo, mensaje, tipo="info", con_cancelar=False):
+        super().__init__(master)
+        self.title(titulo)
+        self.geometry("450x220")
+        self.attributes("-topmost", True)
+        self.resizable(False, False)
+
+        # Bloquear la ventana principal hasta que se cierre esta
+        self.transient(master)
+        self.grab_set()
+
+        # Centrar la ventanita respecto a la PANTALLA completa
+        self.update_idletasks()
+        ancho_pantalla = self.winfo_screenwidth()
+        alto_pantalla = self.winfo_screenheight()
+        
+        x = (ancho_pantalla // 2) - (250 // 2)
+        y = (alto_pantalla // 2) - (180 // 2)
+        self.geometry(f"+{x}+{y}")
+        
+        self.resultado = False
+        
+        # Paleta de colores según el tipo de alerta
+        colores = {
+            "info": "#17a2b8",      # Azul claro
+            "warning": "#f39c12",   # Naranja
+            "error": "#e74c3c",     # Rojo
+            "pregunta": "#6f42c1"   # Morado
+        }
+        color_tema = colores.get(tipo, "#17a2b8")
+
+        # Construcción de la interfaz del modal
+        ctk.CTkLabel(self, text=titulo, font=("Arial", 16, "bold"), text_color=color_tema).pack(pady=(20, 10))
+        ctk.CTkLabel(self, text=mensaje, font=("Arial", 13), wraplength=400, justify="center").pack(pady=(0, 20), padx=20, fill="both", expand=True)
+
+        frame_btns = ctk.CTkFrame(self, fg_color="transparent")
+        frame_btns.pack(pady=(0, 20))
+
+        if con_cancelar:
+            ctk.CTkButton(frame_btns, text="Cancelar", width=100, fg_color="#6c757d", hover_color="#5a6268", 
+                          command=lambda: self.accionar(False)).pack(side="left", padx=10)
+            ctk.CTkButton(frame_btns, text="Aceptar", width=100, fg_color=color_tema, hover_color=color_tema, 
+                          command=lambda: self.accionar(True)).pack(side="left", padx=10)
+        else:
+            ctk.CTkButton(frame_btns, text="Aceptar", width=120, fg_color=color_tema, hover_color=color_tema, 
+                          command=lambda: self.accionar(True)).pack(side="left", padx=10)
+
+        # Captura el foco para que el usuario no pueda dar clic en la ventana principal
+        self.grab_set()
+
+    def accionar(self, resultado):
+        self.resultado = resultado
+        self.destroy()
+
+    def obtener_resultado(self):
+        # Detiene la ejecución de la función que lo llamó hasta que esta ventana se cierre
+        self.master.wait_window(self)
+        return self.resultado
+
 # ==========================================
-# 3. INTERFAZ GRÁFICA PRINCIPAL
+# 5. INTERFAZ GRÁFICA PRINCIPAL
 # ==========================================
 class AplicacionCargas(ctk.CTk):
     def __init__(self):
@@ -209,69 +396,191 @@ class AplicacionCargas(ctk.CTk):
         self.txt_log.pack(pady=10, padx=20, fill="both", expand=True)
         self.log("Sistema multi-motor iniciado. Listo para cargar.")
 
-        # ========================================================
-        # PESTAÑA 2: DATOS DUMMY (Espacio preparado)
-        # ========================================================
         # ----------------------------------------------------
         # VISTA 2: GENERADOR DUMMY (Totalmente independiente)
         # ----------------------------------------------------
         # ========================================================
         # PESTAÑA 2: DATOS DUMMY 
         # ========================================================
-        
-        # BLOQUE 1: Conexión (Servidor y BD en la misma tarjeta)
-        self.frame_conn_dummy = ctk.CTkFrame(self.tab_dummy, fg_color="#2b2b2b", corner_radius=10)
-        self.frame_conn_dummy.pack(pady=10, padx=20, fill="x")
 
-        ctk.CTkLabel(self.frame_conn_dummy, text="1. Origen de Datos (Lectura de Esquema)", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=2, padx=15, pady=(10,5), sticky="w")
+        # CONTENEDOR MAESTRO DIVIDIDO EN 2 COLUMNAS (50/50)
+        self.frame_split_dummy = ctk.CTkFrame(self.tab_dummy, fg_color="transparent")
+        self.frame_split_dummy.pack(pady=10, padx=20, fill="both", expand=True)
+        
+        self.frame_split_dummy.grid_columnconfigure(0, weight=1) # Columna Izquierda
+        self.frame_split_dummy.grid_columnconfigure(1, weight=1) # Columna Derecha
+        self.frame_split_dummy.grid_rowconfigure(0, weight=1)
+
+        # ==========================================
+        # COLUMNA IZQUIERDA: Origen y Configuración
+        # ==========================================
+        frame_izq_main = ctk.CTkFrame(self.frame_split_dummy, fg_color="transparent")
+        frame_izq_main.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+        # BLOQUE 1: Conexión
+        self.frame_conn_dummy = ctk.CTkFrame(frame_izq_main, fg_color="#2b2b2b", corner_radius=10)
+        self.frame_conn_dummy.pack(fill="x", pady=(0, 2))
+
+        ctk.CTkLabel(self.frame_conn_dummy, text="1. Origen de Datos", font=("Arial", 14, "bold")).pack(anchor="w", padx=15, pady=(10, 5))
         
         self.cmb_servidores_dummy = ctk.CTkComboBox(self.frame_conn_dummy, width=280, values=["Seleccione un servidor..."], command=self.al_seleccionar_servidor_dummy)
-        self.cmb_servidores_dummy.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="w")
+        self.cmb_servidores_dummy.pack(anchor="w", padx=15, pady=(0, 10))
 
         self.cmb_dbs_dummy = ctk.CTkComboBox(self.frame_conn_dummy, width=280, values=["Primero conecte..."])
-        self.cmb_dbs_dummy.grid(row=1, column=1, padx=15, pady=(0, 15), sticky="w")
+        self.cmb_dbs_dummy.pack(anchor="w", padx=15, pady=(0, 2))
 
-        # BLOQUE 2: Configuración del CSV Dummy
-        self.frame_params_dummy = ctk.CTkFrame(self.tab_dummy, fg_color="#2b2b2b", corner_radius=10)
-        self.frame_params_dummy.pack(pady=10, padx=20, fill="x")
+        # BLOQUE 2: Configuración del Generador
+        self.frame_params_dummy = ctk.CTkFrame(frame_izq_main, fg_color="#2b2b2b", corner_radius=10)
+        self.frame_params_dummy.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(self.frame_params_dummy, text="2. Configuración de Generación", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=3, padx=15, pady=(10,5), sticky="w")
+        ctk.CTkLabel(self.frame_params_dummy, text="2. Configuración de Generación", font=("Arial", 14, "bold")).pack(anchor="w", padx=15, pady=(0, 1))
 
-        # Fila 1: Tabla, Cantidad y Botón Generar
+        ctk.CTkLabel(self.frame_params_dummy, text="Tabla destino:", font=("Arial", 12)).pack(anchor="w", padx=15, pady=(0, 2))
+        
         self.frame_tabla_dummy_input = ctk.CTkFrame(self.frame_params_dummy, fg_color="transparent")
-        self.frame_tabla_dummy_input.grid(row=1, column=0, padx=15, pady=(0, 5), sticky="w")
-        self.ent_tabla_dummy = ctk.CTkEntry(self.frame_tabla_dummy_input, width=160, placeholder_text="Nombre de la tabla...")
+        self.frame_tabla_dummy_input.pack(fill="x", padx=15, pady=(0, 1))
+        
+        self.ent_tabla_dummy = ctk.CTkEntry(self.frame_tabla_dummy_input, width=180, placeholder_text="Nombre de la tabla...")
         self.ent_tabla_dummy.pack(side="left", padx=(0, 5))
+        
         self.btn_validar_dummy = ctk.CTkButton(self.frame_tabla_dummy_input, text="🔍 Validar", width=70, command=self.validar_tabla_dummy)
         self.btn_validar_dummy.pack(side="left")
 
-        self.ent_cantidad_dummy = ctk.CTkEntry(self.frame_params_dummy, width=120, placeholder_text="Filas (Ej. 500)")
-        self.ent_cantidad_dummy.grid(row=1, column=1, padx=10, pady=(0, 5), sticky="w")
-        self.btn_generar_dummy = ctk.CTkButton(self.frame_params_dummy, text="🎲 Generar CSV Dummy", font=("Arial", 12, "bold"), fg_color="#6f42c1", hover_color="#59339d", command=self.ejecutar_generacion_dummy)
-        self.btn_generar_dummy.grid(row=1, column=2, padx=10, pady=(0, 5), sticky="w")
+        # Etiqueta arriba
+        ctk.CTkLabel(self.frame_params_dummy, text="Volumen a generar:", font=("Arial", 12)).pack(anchor="w", padx=15, pady=(5, 2))
+        
+        # NUEVO: Contenedor horizontal para Entry y Botón
+        frame_generar_input = ctk.CTkFrame(self.frame_params_dummy, fg_color="transparent")
+        frame_generar_input.pack(fill="x", padx=15, pady=(0, 5))
+        
+        self.ent_cantidad_dummy = ctk.CTkEntry(frame_generar_input, width=120, placeholder_text="Filas (Ej. 500)")
+        self.ent_cantidad_dummy.pack(side="left", padx=(0, 10))
 
-        # Fila 2: Campo Multilínea para Reglas y Relaciones
-        ctk.CTkLabel(self.frame_params_dummy, text="Reglas y Relaciones (Una por línea):").grid(row=2, column=0, padx=15, pady=(5, 5), sticky="nw")
+        self.btn_generar_dummy = ctk.CTkButton(frame_generar_input, text="🎲 Generar CSV Dummy", font=("Arial", 12, "bold"), fg_color="#6f42c1", hover_color="#59339d", command=self.ejecutar_generacion_dummy)
+        self.btn_generar_dummy.pack(side="left")
+
+        # El status queda empaquetado de forma normal en el contenedor principal (abajo del frame horizontal)
+        self.lbl_tabla_status_dummy = ctk.CTkLabel(self.frame_params_dummy, text="✨ Status: Escriba la tabla y presione Validar.", text_color="#aaaaaa", font=("Arial", 11, "italic"))
+        self.lbl_tabla_status_dummy.pack(anchor="w", padx=15, pady=(0, 10))
+
+        # ==========================================
+        # COLUMNA DERECHA: Editor de Reglas Gigante
+        # ==========================================
+        frame_der_main = ctk.CTkFrame(self.frame_split_dummy, fg_color="#2b2b2b", corner_radius=10)
+        frame_der_main.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+
+        frame_header_reglas = ctk.CTkFrame(frame_der_main, fg_color="transparent")
+        frame_header_reglas.pack(fill="x", padx=15, pady=(10, 2))
         
-        frame_lbl_reglas = ctk.CTkFrame(self.frame_params_dummy, fg_color="transparent")
-        frame_lbl_reglas.grid(row=2, column=0, padx=15, pady=(5, 5), sticky="nw")
+        ctk.CTkLabel(frame_header_reglas, text="Reglas de Negocio:", font=("Arial", 14, "bold")).pack(side="left")
         
-        ctk.CTkLabel(frame_lbl_reglas, text="Reglas y Relaciones:").pack(anchor="w")
-        self.btn_ampliar = ctk.CTkButton(frame_lbl_reglas, text="🗔 Ampliar Editor", width=120, height=28, fg_color="#17a2b8", hover_color="#138496", command=self.modal_editar_reglas)
-        self.btn_ampliar.pack(anchor="w", pady=(10,0))
+        self.lbl_ayuda = ctk.CTkLabel(frame_header_reglas, text="❔", font=("Arial", 18), text_color="#17a2b8", cursor="hand2")
+        self.lbl_ayuda.pack(side="right")
         
-        self.txt_relaciones = ctk.CTkTextbox(self.frame_params_dummy, width=350, height=80, fg_color="#1a1a1a")
-        self.txt_relaciones.grid(row=2, column=1, columnspan=2, padx=10, pady=(5, 5), sticky="w")
+        texto_ayuda = (
+            "📖 GUÍA DE SINTAXIS\n"
+            "----------------------------\n"
+            "• Relación FK  : tabla.columna\n"
+            "• Lista Fija   : opcion1, opcion2\n"
+            "• Rango Núm.   : [1-100]\n"
+            "• Patrón Texto : FAC-####-???\n"
+            "• Matemáticas  : = col1 + col2\n"
+            "• Concatenar   : = col1 + '-' + col2"
+        )
+        ToolTip(self.lbl_ayuda, texto_ayuda)
+
+        # Este cuadro de texto ahora abarcará toda la altura del lado derecho
+        self.txt_relaciones = ctk.CTkTextbox(frame_der_main, fg_color="#1a1a1a")
+        self.txt_relaciones.pack(fill="both", expand=True, padx=15, pady=(5, 10))
         self.txt_relaciones.insert("1.0", "Ej. id_rol : roles.id\nEj. codigo : CUST-####\nEj. estatus : ACTIVO, INACTIVO")
 
-        # Fila 3: Etiqueta de estado
-        self.lbl_tabla_status_dummy = ctk.CTkLabel(self.frame_params_dummy, text="Escriba la tabla y presione Validar.", text_color="#aaaaaa", font=("Arial", 11, "italic"))
-        self.lbl_tabla_status_dummy.grid(row=3, column=0, columnspan=3, padx=15, pady=(0, 10), sticky="w")
+        self.btn_ampliar = ctk.CTkButton(frame_der_main, text="🗔 Ampliar Editor", width=120, height=28, fg_color="#17a2b8", hover_color="#138496", command=self.modal_editar_reglas)
+        self.btn_ampliar.pack(anchor="e", padx=15, pady=(0, 15))
+
 
         # BLOQUE 3: Log Independiente para esta vista
         self.txt_log_dummy = ctk.CTkTextbox(self.tab_dummy, height=180, fg_color="#1a1a1a", text_color="#d63384", font=("Consolas", 12))
         self.txt_log_dummy.pack(pady=10, padx=20, fill="both", expand=True)
         self.txt_log_dummy.insert("end", "Módulo Dummy iniciado. Listo para generar datos.\n")
+
+
+
+        # ==========================================
+        # PESTAÑA 3: AMBIENTACIÓN GLOBAL (ORQUESTADOR)
+        # ==========================================
+        self.tabview.add("Ambientación Global")
+        tab_global = self.tabview.tab("Ambientación Global")
+        
+        # Fila Superior: Selección y Escaneo
+        frame_top_global = ctk.CTkFrame(tab_global, fg_color="transparent")
+        frame_top_global.pack(fill="x", padx=15, pady=10)
+        
+        ctk.CTkLabel(frame_top_global, text="Base de Datos a Orquestar:").pack(side="left", padx=(0, 10))
+        self.cmb_dbs_global = ctk.CTkComboBox(frame_top_global, values=["Primero conecte un servidor"], width=200)
+        self.cmb_dbs_global.pack(side="left", padx=10)
+        
+        # Botón Principal (Carga Instantánea desde Local Memory)
+        self.btn_escanear_db = ctk.CTkButton(frame_top_global, text="⚡ Cargar Árbol (Caché)", fg_color="#28a745", hover_color="#218838", command=lambda: self.escanear_dependencias(usar_cache=True))
+        self.btn_escanear_db.pack(side="left", padx=(20, 5))
+
+        # Botón Secundario (Escaneo forzado a la BD)
+        self.btn_forzar_escaneo = ctk.CTkButton(frame_top_global, text="🔄 Escaneo Profundo", width=130, fg_color="#6c757d", hover_color="#5a6268", command=lambda: self.escanear_dependencias(usar_cache=False))
+        self.btn_forzar_escaneo.pack(side="left")
+
+        # Contenedor Central: Lista de Tablas y Volúmenes
+        ctk.CTkLabel(tab_global, text="Árbol de Ejecución y Volumetría:", font=("Arial", 14, "bold")).pack(anchor="w", padx=15, pady=(10, 0))
+
+        # Controles unificados: Acción Masiva (Izquierda) y Buscador (Derecha)
+        frame_controles = ctk.CTkFrame(tab_global, fg_color="transparent")
+        frame_controles.pack(fill="x", padx=15, pady=(5, 5))
+        
+        # --- Bloque Izquierdo: Acciones Masivas ---
+        ctk.CTkButton(frame_controles, text="👁️ Todo a Solo Lectura", width=140, fg_color="#495057", command=lambda: self.cambiar_modo_masivo("Solo Lectura")).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(frame_controles, text="⚡ Todo a Generar", width=130, fg_color="#28a745", command=lambda: self.cambiar_modo_masivo("Generar")).pack(side="left", padx=5)
+        
+        ctk.CTkLabel(frame_controles, text="Filas:").pack(side="left", padx=(10, 2))
+        ent_vol_masivo = ctk.CTkEntry(frame_controles, width=60)
+        ent_vol_masivo.insert(0, "1000")
+        ent_vol_masivo.pack(side="left")
+        ctk.CTkButton(frame_controles, text="Aplicar", width=60, command=lambda: self.aplicar_volumen_masivo(ent_vol_masivo.get())).pack(side="left", padx=(2, 5))
+
+        # --- Bloque Derecho: Buscador Inteligente ---
+        # Empaquetamos con side="right" para que se alineen al extremo derecho
+        btn_aislar = ctk.CTkButton(frame_controles, text="🎯 Aislar (Dependencias)", fg_color="#fd7e14", hover_color="#e36414", command=self.aislar_tabla)
+        btn_aislar.pack(side="right", padx=(5, 0))
+        
+        self.ent_buscar_tabla = ctk.CTkEntry(frame_controles, width=130, placeholder_text="Ej. usuarios")
+        self.ent_buscar_tabla.pack(side="right", padx=5)
+
+        # NUEVO: Evento para filtrar en tiempo real mientras se escribe
+        self.ent_buscar_tabla.bind("<KeyRelease>", self.filtrar_tablas)
+        
+        ctk.CTkLabel(frame_controles, text="Focalizar:", font=("Arial", 12, "bold")).pack(side="right", padx=(5, 5))
+
+        # Frame scrolleable donde inyectaremos la interfaz de cada tabla dinámicamente
+        self.scroll_orquestador = ctk.CTkScrollableFrame(tab_global, height=250, fg_color="#1a1a1a")
+        self.scroll_orquestador.pack(fill="both", expand=True, padx=15, pady=5)
+        
+        # Fila Inferior: Botón de Ejecución Maestra y Límite de Seguridad
+        frame_bot_global = ctk.CTkFrame(tab_global, fg_color="transparent")
+        frame_bot_global.pack(fill="x", padx=15, pady=10)
+        
+        # NUEVO: Control de límite
+        ctk.CTkLabel(frame_bot_global, text="Límite de tablas a procesar:", font=("Arial", 12, "bold"), text_color="#f39c12").pack(side="left", padx=(0, 5))
+        self.ent_limite_tablas = ctk.CTkEntry(frame_bot_global, width=50, justify="center")
+        self.ent_limite_tablas.insert(0, "5") # Empezamos con 5 por seguridad
+        self.ent_limite_tablas.pack(side="left")
+        
+        self.btn_iniciar_orquestador = ctk.CTkButton(frame_bot_global, text="🚀 Iniciar Ambientación Masiva", height=35, fg_color="#6f42c1", hover_color="#59339d", font=("Arial", 13, "bold"), command=self.ejecutar_orquestador)
+        self.btn_iniciar_orquestador.pack(side="right")
+
+        # Consola de logs independiente para el Orquestador
+        self.txt_log_global = ctk.CTkTextbox(tab_global, height=130, fg_color="#1a1a1a", text_color="#00ffff", font=("Consolas", 12))
+        self.txt_log_global.pack(pady=(15, 0), padx=15, fill="x")
+        self.txt_log_global.insert("end", "Módulo Orquestador iniciado. Listo para escanear dependencias.\n")
+        
+        # Diccionario temporal para guardar las referencias a las cajas de texto (volumen) de la UI
+        self.inputs_volumen = {}
 
     # ==========================================
     # LÓGICA DE UI Y EVENTOS
@@ -345,6 +654,11 @@ class AplicacionCargas(ctk.CTk):
             if dbs:
                 self.cmb_dbs.configure(values=dbs)
                 self.cmb_dbs.set(dbs[0])
+                
+                # NUEVO: Actualizar el selector de la pestaña Ambientación Global
+                self.cmb_dbs_global.configure(values=dbs)
+                self.cmb_dbs_global.set(dbs[0])
+                
                 self.al_seleccionar_db(dbs[0])
             self.log(f"Conectado a {srv['tipo']}: {srv['nombre']}.")
         except Exception as e:
@@ -488,6 +802,52 @@ class AplicacionCargas(ctk.CTk):
             self.archivo_csv = ruta
             self.lbl_archivo.configure(text=os.path.basename(ruta))
 
+    def log_global(self, mensaje):
+        from datetime import datetime
+        hora = datetime.now().strftime("%H:%M:%S")
+        self.txt_log_global.insert("end", f"[{hora}] {mensaje}\n")
+        self.txt_log_global.see("end")
+
+    def cambiar_modo_masivo(self, nuevo_modo):
+        # Verifica que ya se haya escaneado el árbol
+        if not getattr(self, 'inputs_volumen', None):
+            return
+            
+        for tabla, controles in self.inputs_volumen.items():
+            # Actualizamos el valor del menú desplegable
+            controles["modo"].set(nuevo_modo)
+            
+            # Bloqueamos o desbloqueamos la caja de texto según el modo
+            if nuevo_modo == "Generar":
+                controles["entry"].configure(state="normal", text_color="#ffffff")
+            else:
+                controles["entry"].configure(state="disabled", text_color="#6c757d")
+                
+        self.log_global(f"🔄 Todas las tablas cambiadas a modo: {nuevo_modo}")
+
+    def aplicar_volumen_masivo(self, volumen_str):
+        if not getattr(self, 'inputs_volumen', None):
+            return
+            
+        if not volumen_str.isdigit():
+            from tkinter import messagebox
+            messagebox.showwarning("Valor Inválido", "Por favor, ingrese un número válido para las filas.")
+            return
+            
+        for tabla, controles in self.inputs_volumen.items():
+            # Si la caja está bloqueada (Solo Lectura), la desbloqueamos un segundo para poder inyectar el texto
+            estado_actual = controles["entry"].cget("state")
+            if estado_actual == "disabled":
+                controles["entry"].configure(state="normal")
+            
+            controles["entry"].delete(0, 'end')
+            controles["entry"].insert(0, volumen_str)
+            
+            # La regresamos a su estado original (bloqueada o normal)
+            if estado_actual == "disabled":
+                controles["entry"].configure(state="disabled")
+                
+        self.log_global(f"🔄 Volumen de {volumen_str} filas aplicado a todas las tablas.")
     # ==========================================
     # MODAL PARA NUEVO SERVIDOR
     # ==========================================
@@ -545,17 +905,17 @@ class AplicacionCargas(ctk.CTk):
         tabla = self.ent_tabla.get().strip() # Ahora leemos directamente de la caja de texto
         
         if not self.archivo_csv:
-            messagebox.showerror("Error", "Debe seleccionar un CSV primero.")
+            DialogoModerno(self, "Error", "Debe seleccionar un CSV primero.", tipo="error").obtener_resultado()
             return
         if not tabla:
-            messagebox.showerror("Error", "Debe escribir el nombre de la tabla destino.")
+            DialogoModerno(self,"Error", "Debe escribir el nombre de la tabla destino.", tipo="error").obtener_resultado()
             return
 
         srv = self.obtener_credenciales(srv_name)
         self.btn_iniciar.configure(state="disabled", text="⏳ PROCESANDO...")
         threading.Thread(target=self.procesar_csv_dual, args=(srv, db_name, tabla), daemon=True).start()
 
-    def procesar_csv_dual(self, srv, db_name, tabla):
+    def procesar_csv_dual(self, srv, db_name, tabla, silencioso=False):
         conn = None
         try:
             tipo_db = srv.get("tipo", "SQL Server")
@@ -656,14 +1016,20 @@ class AplicacionCargas(ctk.CTk):
                     csv_buffer.close()
 
             self.log(f"✅ CARGA FINALIZADA EXITOSAMENTE. Total: {total_insertados} filas.")
-            messagebox.showinfo("Éxito", f"Se insertaron {total_insertados} registros en {tabla} ({tipo_db}).")
-
+            # SOLUCIÓN: Enviar la orden de crear la UI al hilo principal
+            if not silencioso:
+                self.after(0, lambda: DialogoModerno(self, "Éxito", f"Se insertaron {total_insertados} registros en {tabla} ({tipo_db}).", tipo="info"))
+            
         except Exception as e:
             self.log(f"❌ ERROR: {str(e)}")
-            messagebox.showerror("Error de Inserción", str(e))
+            if not silencioso:
+                self.after(0, lambda: DialogoModerno(self, "Error de Inserción", str(e), tipo="error"))
+            else:
+                raise e # Si está en modo silencioso, le pasa el error al Orquestador para que lo atrape
         finally:
             if conn: conn.close()
-            self.btn_iniciar.configure(state="normal", text="🚀 INICIAR CARGA MASIVA")
+            if not silencioso:
+                self.after(0, lambda: self.btn_iniciar.configure(state="normal", text="🚀 INICIAR CARGA MASIVA"))
 
     def _transformar_fila(self, fila, col_count, columnas_sql, acepta_nulos):
         fila_procesada = []
@@ -761,6 +1127,10 @@ class AplicacionCargas(ctk.CTk):
                 if dbs:
                     self.cmb_dbs_dummy.configure(values=dbs)
                     self.cmb_dbs_dummy.set(dbs[0])
+                    
+                    # NUEVO: Actualizar el selector de la pestaña Ambientación Global
+                    self.cmb_dbs_global.configure(values=dbs)
+                    self.cmb_dbs_global.set(dbs[0])
                 self.log_dummy(f"Conectado a {srv['tipo']}: {srv['nombre']}.")
             except Exception as e:
                 self.cmb_dbs_dummy.set("Error de conexión")
@@ -790,11 +1160,12 @@ class AplicacionCargas(ctk.CTk):
         # ==========================================
         memoria = cargar_relaciones()
         
-        # Inicializamos la BD en el diccionario si no existe
+        # Inicializamos la BD en el diccionario si no existe con su estructura base
         if db_name not in memoria:
-            memoria[db_name] = {}
+            memoria[db_name] = {"_configuracion_global": {}, "tablas": {}}
             
-        reglas_guardadas = memoria[db_name].get(tabla_input.lower(), "")
+        # AQUÍ ESTÁ EL CAMBIO: Entrar primero a .get("tablas", {})
+        reglas_guardadas = memoria[db_name].get("tablas", {}).get(tabla_input.lower(), "")
         
         self.txt_relaciones.delete("1.0", "end")
         if reglas_guardadas:
@@ -877,7 +1248,7 @@ class AplicacionCargas(ctk.CTk):
                 memoria = cargar_relaciones()
                 if db_name not in memoria:
                     memoria[db_name] = {}
-                memoria[db_name][tabla.lower()] = nuevas_reglas
+                memoria[db_name]["tablas"][tabla.lower()] = nuevas_reglas
                 guardar_relaciones(memoria)
                 self.log_dummy(f"💾 Reglas guardadas en el archivo JSON para '{tabla}'.")
 
@@ -912,13 +1283,14 @@ class AplicacionCargas(ctk.CTk):
         if reglas_str and not reglas_str.startswith("Ej."):
             memoria = cargar_relaciones()
             if db_name not in memoria:
-                memoria[db_name] = {}
+                # Inicializar correctamente la estructura anidada
+                memoria[db_name] = {"_configuracion_global": {}, "tablas": {}}
                 
-            if memoria[db_name].get(tabla.lower()) != reglas_str:
-                memoria[db_name][tabla.lower()] = reglas_str
+            # Modificar la lectura para comparar entrando a "tablas"
+            if memoria[db_name].get("tablas", {}).get(tabla.lower()) != reglas_str:
+                memoria[db_name]["tablas"][tabla.lower()] = reglas_str
                 guardar_relaciones(memoria)
                 self.log_dummy(f"💾 Reglas guardadas para '{tabla}' en '{db_name}'.")
-        # ==========================================
 
         srv = self.obtener_credenciales(srv_name)
         if not srv or "Primero conecte" in db_name:
@@ -1104,7 +1476,13 @@ class AplicacionCargas(ctk.CTk):
                             # Asignamos el resultado a la columna original correcta
                             for original_col in fila_dict.keys():
                                 if original_col.lower() == cn_math:
-                                    fila_dict[original_col] = int(resultado) if isinstance(resultado, float) and resultado.is_integer() else round(resultado, 2)
+                                    
+                                    # NUEVO: Validamos si el resultado es número o texto
+                                    if isinstance(resultado, (int, float)):
+                                        fila_dict[original_col] = int(resultado) if isinstance(resultado, float) and resultado.is_integer() else round(resultado, 2)
+                                    else:
+                                        fila_dict[original_col] = str(resultado)
+                                        
                                     # Actualizamos contexto por si otra fórmula depende de esta
                                     locals_eval[cn_math] = fila_dict[original_col] 
                                     break
@@ -1133,6 +1511,309 @@ class AplicacionCargas(ctk.CTk):
         finally:
             if conn: conn.close()
             self.btn_generar_dummy.configure(state="normal", text="🎲 Generar CSV Dummy")
+
+    def escanear_dependencias(self, usar_cache=True):
+        db_name = self.cmb_dbs_global.get()
+        srv_name = self.cmb_servidores.get()
+        if srv_name in ["Seleccione un servidor...", "No hay servidores"]:
+            srv_name = self.cmb_servidores_dummy.get()
+            
+        if "Primero conecte" in db_name or srv_name in ["Seleccione un servidor...", "No hay servidores"]:
+            DialogoModerno(self, "Falta Conexión", "Por favor, selecciona tu servidor SQL y conecta una base de datos primero.", tipo="warning").obtener_resultado()
+            return
+
+        self.btn_escanear_db.configure(state="disabled", text="⏳ Cargando...")
+        self.update() 
+        
+        srv = self.obtener_credenciales(srv_name)
+        if not srv: 
+            self.btn_escanear_db.configure(state="normal", text="⚡ Cargar Árbol (Caché)")
+            return
+
+        # Limpiar la interfaz anterior
+        for widget in self.scroll_orquestador.winfo_children():
+            widget.destroy()
+        self.inputs_volumen.clear()
+
+        memoria = cargar_relaciones()
+        conf_global = memoria.get(db_name, {}).get("_configuracion_global", {})
+        
+        tablas_ordenadas = []
+        niveles = {}
+        dependencias = {}
+
+        # ==========================================
+        # 1. INTENTO DE CARGA DESDE LOCAL MEMORY
+        # ==========================================
+        if usar_cache and conf_global.get("orden_ejecucion") and conf_global.get("arbol_dependencias"):
+            self.log_global("⚡ Cargando estructura instantáneamente desde Local Memory...")
+            tablas_ordenadas = conf_global["orden_ejecucion"]
+            self.arbol_dependencias = conf_global["arbol_dependencias"]
+            niveles = conf_global.get("niveles", {})
+            volumenes_guardados = conf_global.get("volumen_registros", {})
+            
+        # ==========================================
+        # 2. ESCANEO PROFUNDO A LA BASE DE DATOS
+        # ==========================================
+        else:
+            self.log_global(f"🔍 Iniciando escaneo profundo de la BD '{db_name}'...")
+            self.update()
+            conn = None
+            try:
+                conn = self.conectar_db(srv, db_name)
+                cursor = conn.cursor()
+                
+                if srv["tipo"] == "SQL Server":
+                    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo'")
+                else:
+                    cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                todas_tablas = [row[0].lower() for row in cursor.fetchall()]
+
+                self.log_global(f"Mapeando llaves foráneas para {len(todas_tablas)} tablas...")
+                self.update()
+
+                dependencias = {t: [] for t in todas_tablas}
+                if srv["tipo"] == "SQL Server":
+                    cursor.execute("SELECT t1.name AS Tabla, t2.name AS TablaRef FROM sys.foreign_keys fk INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id")
+                    for tabla, tabla_ref in cursor.fetchall():
+                        if tabla.lower() != tabla_ref.lower():
+                            dependencias[tabla.lower()].append(tabla_ref.lower())
+                
+                self.arbol_dependencias = dependencias 
+
+                self.log_global("Calculando Topological Sort...")
+                self.update()
+                
+                tablas_restantes = set(todas_tablas)
+                nivel_actual = 0
+                
+                while tablas_restantes:
+                    tablas_listas = [t for t in tablas_restantes if all(d not in tablas_restantes for d in dependencias.get(t, []))]
+                    
+                    if not tablas_listas:
+                        self.log_global("⚠️ Dependencia circular detectada. Resolviendo forzosamente.")
+                        tablas_listas = list(tablas_restantes)
+                    
+                    for t in tablas_listas:
+                        niveles[t] = nivel_actual
+                        tablas_restantes.remove(t)
+                    nivel_actual += 1
+
+                tablas_ordenadas = sorted(niveles.keys(), key=lambda t: niveles[t])
+                volumenes_guardados = conf_global.get("volumen_registros", {})
+
+                # GUARDAR EN LOCAL MEMORY PARA FUTURAS CARGAS RÁPIDAS
+                if db_name not in memoria: 
+                    memoria[db_name] = {"_configuracion_global": {}, "tablas": {}}
+                memoria[db_name]["_configuracion_global"]["orden_ejecucion"] = tablas_ordenadas
+                memoria[db_name]["_configuracion_global"]["arbol_dependencias"] = dependencias
+                memoria[db_name]["_configuracion_global"]["niveles"] = niveles
+                guardar_relaciones(memoria)
+                self.log_global("💾 Estructura guardada en Caché Local exitosamente.")
+
+            except Exception as e:
+                self.log_global(f"❌ Error escaneando dependencias: {e}")
+                self.btn_escanear_db.configure(state="normal", text="⚡ Cargar Árbol (Caché)")
+                return
+            finally:
+                if conn: conn.close()
+
+        # ==========================================
+        # 3. RENDERIZADO DE INTERFAZ
+        # ==========================================
+        for idx, tabla in enumerate(tablas_ordenadas):
+            row_frame = ctk.CTkFrame(self.scroll_orquestador, fg_color=("#333333" if idx % 2 == 0 else "#2a2a2a"))
+            row_frame.pack(fill="x", pady=2, padx=5)
+            
+            # Usar .get(tabla, 0) por si el nivel no existe en alguna migración
+            ctk.CTkLabel(row_frame, text=f"Lvl {niveles.get(tabla, 0)}", width=40, font=("Arial", 11, "bold"), text_color="#17a2b8").pack(side="left", padx=10)
+            ctk.CTkLabel(row_frame, text=tabla, width=180, anchor="w").pack(side="left", padx=5)
+
+            btn_reglas = ctk.CTkButton(row_frame, text="📄 Reglas", width=60, height=24, fg_color="#6c757d", hover_color="#5a6268", command=lambda t=tabla: self.mostrar_reglas_rapidas(t))
+            btn_reglas.pack(side="left", padx=5)
+
+            modo_actual = "Solo Lectura" 
+            cmb_modo_var = ctk.StringVar(value=modo_actual)
+            cmb_modo = ctk.CTkOptionMenu(row_frame, values=["Generar", "Solo Lectura", "Ignorar"], variable=cmb_modo_var, width=110, fg_color="#495057", button_color="#343a40")
+            cmb_modo.pack(side="right", padx=15)
+            
+            ent_vol = ctk.CTkEntry(row_frame, width=70)
+            ent_vol.insert(0, str(volumenes_guardados.get(tabla, 100)))
+            ent_vol.pack(side="right", padx=5)
+            ctk.CTkLabel(row_frame, text="Filas:").pack(side="right", padx=0)
+            
+            def toggle_volumen(modo_seleccionado, entry_widget=ent_vol):
+                if modo_seleccionado == "Generar":
+                    entry_widget.configure(state="normal", text_color="#ffffff")
+                else:
+                    entry_widget.configure(state="disabled", text_color="#6c757d")
+            
+            cmb_modo.configure(command=lambda m, e=ent_vol: toggle_volumen(m, e))
+            toggle_volumen(modo_actual) 
+            
+            self.inputs_volumen[tabla] = {"entry": ent_vol, "modo": cmb_modo_var, "nivel": niveles.get(tabla, 0), "frame": row_frame}
+
+        self.log_global(f"✅ Interfaz lista. {len(tablas_ordenadas)} tablas cargadas en el árbol.")
+        self.btn_escanear_db.configure(state="normal", text="⚡ Cargar Árbol (Caché)")
+    
+    def ejecutar_orquestador(self):
+        srv_name = self.cmb_servidores.get()
+        db_name = self.cmb_dbs_global.get()
+        
+        if not getattr(self, 'inputs_volumen', None):
+            messagebox.showwarning("Atención", "Primero haz clic en 'Escanear Dependencias' para cargar el árbol de tablas.")
+            return
+            
+        srv = self.obtener_credenciales(srv_name)
+        
+        # Recopilar la configuración de la interfaz (ignora las tablas en 'Solo Lectura')
+        plan_ejecucion = []
+        for tabla, controles in self.inputs_volumen.items():
+            if controles["modo"].get() == "Generar":
+                try:
+                    cantidad = int(controles["entry"].get())
+                    if cantidad > 0: plan_ejecucion.append((tabla, cantidad))
+                except ValueError:
+                    pass
+                    
+        # Validar si no hay tablas seleccionadas
+        if not plan_ejecucion:
+            messagebox.showinfo("Sin acciones", "No hay tablas marcadas para 'Generar' con filas mayores a 0.")
+            return
+            
+        # NUEVO: Validar el límite de seguridad
+        try:
+            limite_seguridad = int(self.ent_limite_tablas.get())
+        except ValueError:
+            limite_seguridad = 5 # Si el usuario borra el texto o pone letras, usamos 5
+            
+        if len(plan_ejecucion) > limite_seguridad:
+            DialogoModerno(self,
+                "Límite de Seguridad Excedido", 
+                f"Has intentado ambientar {len(plan_ejecucion)} tablas a la vez, pero tu límite actual es {limite_seguridad}.\n\n"
+                "Por favor, regresa más tablas a 'Solo Lectura' o aumenta el límite bajo tu propio riesgo.",
+            tipo="error").obtener_resultado()
+            return
+            
+        confirmacion = DialogoModerno(
+            self, 
+            "Confirmar Ambientación", 
+            f"Se generarán e insertarán datos para {len(plan_ejecucion)} tablas en cascada.\n\n¿Desea continuar?", 
+            tipo="pregunta", 
+            con_cancelar=True
+        ).obtener_resultado()
+        
+        if not confirmacion:
+            return
+                
+        self.btn_iniciar_orquestador.configure(state="disabled", text="⏳ AMBIENTANDO EN CASCADA...")
+        import threading
+        threading.Thread(target=self._hilo_orquestador, args=(srv, srv_name, db_name, plan_ejecucion), daemon=True).start()
+
+    def _hilo_orquestador(self, srv, srv_name, db_name, plan_ejecucion):
+        memoria = cargar_relaciones()
+        reglas_db = memoria.get(db_name, {}).get("tablas", {})
+        
+        try:
+            for tabla, cantidad in plan_ejecucion:
+                self.log(f"\n🚀 [ORQUESTADOR] Procesando tabla: {tabla.upper()} ({cantidad} filas)")
+                reglas_str = reglas_db.get(tabla, "")
+                
+                # 1. Fuerza al generador Dummy a crear el archivo CSV con tus reglas lógicas
+                self._hilo_generar_dummy(srv, srv_name, db_name, tabla, cantidad, reglas_str)
+                
+                # 2. Fuerza al motor de Carga Masiva a insertarlo físicamente en la BD
+                if getattr(self, 'archivo_csv', None):
+                    # AQUÍ ESTÁ EL CAMBIO: Le pasamos silencioso=True
+                    self.procesar_csv_dual(srv, db_name, tabla, silencioso=True)
+                    
+            # Al final del ciclo, el Orquestador da su única alerta global
+            self.after(0, lambda: DialogoModerno(self, "Orquestador Finalizado", "¡La ambientación masiva ha concluido con éxito para todas las tablas seleccionadas!", tipo="info"))
+        except Exception as e:
+            self.after(0, lambda: DialogoModerno(self, "Error en Cascada", f"El proceso se detuvo por un error en una tabla: {e}", tipo="error"))
+        finally:
+            self.after(0, lambda: self.btn_iniciar_orquestador.configure(state="normal", text="🚀 Iniciar Ambientación Masiva"))
+
+
+    def filtrar_tablas(self, event=None):
+        busqueda = self.ent_buscar_tabla.get().strip().lower()
+        
+        # 1. Ocultar todos primero usando pack_forget()
+        for tabla, controles in self.inputs_volumen.items():
+            controles["frame"].pack_forget()
+            
+        # 2. Volver a empaquetar solo los que coinciden (mantiene el orden original)
+        for tabla, controles in self.inputs_volumen.items():
+            if busqueda in tabla.lower():
+                controles["frame"].pack(fill="x", pady=2, padx=5)
+
+    def aislar_tabla(self):
+        busqueda = self.ent_buscar_tabla.get().strip().lower()
+        if not busqueda:
+            self.log_global("⚠️ Escriba el nombre de una tabla para buscar y aislar.")
+            return
+
+        if not hasattr(self, 'arbol_dependencias'):
+            self.log_global("⚠️ Primero debe escanear las dependencias.")
+            return
+
+        tablas_objetivo = set()
+        for t in self.inputs_volumen.keys():
+            if busqueda in t.lower():
+                tablas_objetivo.add(t.lower())
+
+        if not tablas_objetivo:
+            self.log_global(f"⚠️ No se encontró ninguna tabla que coincida con '{busqueda}'.")
+            return
+
+        padres_necesarios = set(tablas_objetivo)
+        cola = list(tablas_objetivo)
+
+        while cola:
+            actual = cola.pop(0)
+            padres = self.arbol_dependencias.get(actual, [])
+            for p in padres:
+                if p not in padres_necesarios:
+                    padres_necesarios.add(p)
+                    cola.append(p)
+
+        # 3. Actualizar UI: SOLO ACTIVAMOS (SUMAMOS), YA NO APAGAMOS LAS DEMÁS
+        for tabla in padres_necesarios:
+            if tabla in self.inputs_volumen:
+                controles = self.inputs_volumen[tabla]
+                controles["modo"].set("Generar")
+                controles["entry"].configure(state="normal", text_color="#ffffff")
+
+        self.log_global(f"🎯 Sumado a Generar: '{busqueda}' y sus dependencias ({len(padres_necesarios)} tablas en total).")
+        
+        # 4. Limpiar el buscador para revelar toda la lista nuevamente
+        self.ent_buscar_tabla.delete(0, 'end')
+        self.filtrar_tablas()
+
+    def mostrar_reglas_rapidas(self, tabla):
+        db_name = self.cmb_dbs_global.get()
+        memoria = cargar_relaciones()
+        # Busca las reglas en la memoria, si no hay, devuelve un texto por defecto
+        reglas = memoria.get(db_name, {}).get("tablas", {}).get(tabla.lower(), "")
+
+        modal = ctk.CTkToplevel(self)
+        modal.title(f"Reglas Actuales - {tabla}")
+        modal.geometry("450x300")
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text=f"Reglas configuradas para: {tabla.upper()}", font=("Arial", 14, "bold")).pack(pady=(15, 5))
+        
+        txt = ctk.CTkTextbox(modal, width=400, height=180, fg_color="#1a1a1a", font=("Consolas", 12))
+        txt.pack(padx=20, pady=10)
+        
+        if reglas and not reglas.startswith("Ej."):
+            txt.insert("1.0", reglas)
+        else:
+            txt.insert("1.0", "⚠️ No hay reglas personalizadas guardadas para esta tabla.\nSe generarán datos aleatorios nativos.")
+            txt.configure(text_color="#aaaaaa")
+            
+        txt.configure(state="disabled") # Modal de solo lectura
+        ctk.CTkButton(modal, text="Cerrar", command=modal.destroy, fg_color="#495057").pack(pady=5)
    
 if __name__ == "__main__":
     multiprocessing.freeze_support()
