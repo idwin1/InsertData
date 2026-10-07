@@ -258,7 +258,15 @@ class DialogoModerno(ctk.CTkToplevel):
     def __init__(self, master, titulo, mensaje, tipo="info", con_cancelar=False):
         super().__init__(master)
         self.title(titulo)
-        self.geometry("450x220")
+
+        # --- NUEVO: Altura dinámica según la longitud del mensaje ---
+        alto_ventana = 220
+        if len(mensaje) > 200:
+            alto_ventana = 310  # Más alto para mensajes largos como el de IDENTITY
+        elif len(mensaje) > 100:
+            alto_ventana = 260
+
+        self.geometry(f"450x{alto_ventana}")
         self.attributes("-topmost", True)
         self.resizable(False, False)
 
@@ -335,10 +343,16 @@ class AplicacionCargas(ctk.CTk):
         self.cancelar_proceso = False
         if not os.path.exists("logs"):
             os.makedirs("logs")
-        # Creamos un archivo de log único por sesión
-        self.archivo_auditoria = f"logs/Auditoria_Cargas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        with open(self.archivo_auditoria, "w", encoding="utf-8") as f:
-            f.write(f"=== SESIÓN DE AUDITORÍA INICIADA: {datetime.now()} ===\n")
+            
+        # Creamos (o usamos) un archivo de log único por DÍA
+        fecha_hoy = datetime.now().strftime('%Y%m%d')
+        self.archivo_auditoria = f"logs/Auditoria_Cargas_{fecha_hoy}.txt"
+        
+        # Usamos "a" (append) para añadir texto sin borrar lo de las pruebas anteriores del día
+        with open(self.archivo_auditoria, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*55}\n")
+            f.write(f"=== NUEVA SESIÓN DE AUDITORÍA: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            f.write(f"{'='*55}\n")
         # -------------------------------------------------
 
         self.crear_interfaz()
@@ -398,6 +412,12 @@ class AplicacionCargas(ctk.CTk):
         # NUEVO BOTÓN: Ver Estructura
         self.btn_estructura = ctk.CTkButton(self.frame_tabla_input, text="📊 Estructura", width=80, fg_color="#17a2b8", hover_color="#138496", command=self.consultar_estructura)
         self.btn_estructura.pack(side="left", padx=(5, 0))
+
+        # --- NUEVO: CHECKBOX DE IDENTITY ---
+        self.chk_identity_var = ctk.BooleanVar(value=True) # Por defecto activado
+        self.chk_identity = ctk.CTkCheckBox(self.frame_tabla_input, text="Forzar IDs", variable=self.chk_identity_var, width=80)
+        self.chk_identity.pack(side="left", padx=(15, 0))
+        # -----------------------------------
 
         self.lbl_tabla_status = ctk.CTkLabel(self.frame_tabla_contenedor, text="Esperando BD...", text_color="#aaaaaa", font=("Arial", 11, "italic"))
         self.lbl_tabla_status.pack(anchor="w", pady=(2, 0))
@@ -930,7 +950,42 @@ class AplicacionCargas(ctk.CTk):
             else:
                 for fk in fks:
                     self.log(f" 🔗 {fk[0]} ---> Depende de la tabla '{fk[1]}' (columna: {fk[2]})")
-            
+
+            # --- NUEVO: DETECTAR ÍNDICES ---
+            self.log(f"--- ⚡ ÍNDICES ---")
+            if srv["tipo"] == "SQL Server":
+                query_idx = f"""
+                    SELECT i.name, i.type_desc 
+                    FROM sys.indexes i 
+                    INNER JOIN sys.tables t ON i.object_id = t.object_id 
+                    WHERE t.name = '{tabla}' AND i.type > 0
+                """
+                cursor.execute(query_idx)
+                indices = cursor.fetchall()
+                if not indices:
+                    self.log(" 🔸 No hay índices (Inserción ultrarrápida).")
+                else:
+                    for idx in indices:
+                        self.log(f" 🗂️ {idx[0]} ({idx[1]})")
+
+            # --- NUEVO: DETECTAR TRIGGERS ---
+            self.log(f"--- 🎯 TRIGGERS ---")
+            if srv["tipo"] == "SQL Server":
+                query_trg = f"""
+                    SELECT tr.name, tr.is_disabled 
+                    FROM sys.triggers tr 
+                    INNER JOIN sys.tables t ON tr.parent_id = t.object_id 
+                    WHERE t.name = '{tabla}'
+                """
+                cursor.execute(query_trg)
+                triggers = cursor.fetchall()
+                if not triggers:
+                    self.log(" 🔸 No hay triggers (No habrá cuellos de botella lógicos).")
+                else:
+                    for trg in triggers:
+                        estado = "Apagado" if trg[1] else "ACTIVO ⚠️"
+                        self.log(f" ⚙️ {trg[0]} | Estado: {estado}")
+
             self.log("-------------------------------------------\n")
                 
         except Exception as e:
@@ -1048,7 +1103,7 @@ class AplicacionCargas(ctk.CTk):
     def iniciar_proceso(self):
         srv_name = self.cmb_servidores.get()
         db_name = self.cmb_dbs.get()
-        tabla = self.ent_tabla.get().strip() # Ahora leemos directamente de la caja de texto
+        tabla = self.ent_tabla.get().strip() 
         
         if not self.archivo_csv:
             DialogoModerno(self, "Error", "Debe seleccionar un CSV primero.", tipo="error").obtener_resultado()
@@ -1058,10 +1113,56 @@ class AplicacionCargas(ctk.CTk):
             return
 
         srv = self.obtener_credenciales(srv_name)
-        self.btn_iniciar.configure(state="disabled", text="⏳ PROCESANDO...")
-        threading.Thread(target=self.procesar_csv_dual, args=(srv, db_name, tabla), daemon=True).start()
+        
+        # Leemos la decisión actual del checkbox
+        forzar_identity = self.chk_identity_var.get()
+        
+        # --- NUEVO: ESCANEO PREVIO Y CONFIRMACIÓN DE IDENTITY ---
+        try:
+            conn_test = self.conectar_db(srv, db_name)
+            cursor_test = conn_test.cursor()
+            tipo_db = srv.get("tipo", "SQL Server")
+            esquema = "dbo" if tipo_db == "SQL Server" else "public"
+            
+            tiene_identity = False
+            nombre_col_id = ""
+            
+            if tipo_db == "SQL Server":
+                # Escaneamos si existe el candado
+                cursor_test.execute(f"SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('{esquema}.{tabla}')")
+                row_id = cursor_test.fetchone()
+                if row_id:
+                    tiene_identity = True
+                    nombre_col_id = row_id[0]
+            conn_test.close()
+            
+            # Si tiene Identity, validamos con el usuario según el estado de su checkbox
+            if tiene_identity:
+                if forzar_identity:
+                    mensaje = (f"La tabla '{tabla}' tiene una columna auto-numérica protegida ('{nombre_col_id}').\n\n"
+                               "Tienes marcada la opción 'Forzar IDs', por lo que el sistema forzará la inserción de los valores exactos de tu CSV.\n\n"
+                               "¿Deseas continuar con esta configuración?")
+                else:
+                    mensaje = (f"La tabla '{tabla}' tiene una columna auto-numérica protegida ('{nombre_col_id}').\n\n"
+                               "Tienes desmarcada la opción 'Forzar IDs', por lo que se recortará esa columna de tu CSV y SQL Server generará números nuevos automáticamente.\n\n"
+                               "¿Deseas continuar?")
+                               
+                # Usamos tu DialogoModerno para bloquear la pantalla y pedir confirmación
+                confirmacion = DialogoModerno(self, "Columna IDENTITY Detectada", mensaje, tipo="pregunta", con_cancelar=True).obtener_resultado()
+                
+                # Si el usuario presiona Cancelar, abortamos el inicio para que pueda cambiar el checkbox
+                if not confirmacion:
+                    return 
+                    
+        except Exception as e:
+            self.log(f"⚠️ Aviso en pre-validación: {e}")
+        # --------------------------------------------------------
 
-    def procesar_csv_dual(self, srv, db_name, tabla, silencioso=False):
+        self.btn_iniciar.configure(state="disabled", text="⏳ PROCESANDO...")
+        threading.Thread(target=self.procesar_csv_dual, args=(srv, db_name, tabla, forzar_identity), daemon=True).start()
+
+
+    def procesar_csv_dual(self, srv, db_name, tabla, forzar_identity=True, silencioso=False):
         conn = None
         try:
             tipo_db = srv.get("tipo", "SQL Server")
@@ -1089,7 +1190,35 @@ class AplicacionCargas(ctk.CTk):
             if col_count == 0:
                 raise Exception("La tabla no existe o no tiene permisos. ¿Escribió el nombre correctamente?")
 
-            # 2. Configurar la lectura del CSV
+            # --- NUEVO: DETECCIÓN INTELIGENTE DE IDENTITY ---
+            columna_identity = None
+            idx_identity = -1
+            tiene_identity = False
+
+            if tipo_db == "SQL Server":
+                # Buscamos si existe alguna columna identity sin importar su nombre
+                cursor.execute(f"SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('{esquema}.{tabla}')")
+                row_id = cursor.fetchone()
+                if row_id:
+                    tiene_identity = True
+                    columna_identity = row_id[0]
+                    # Encontramos en qué posición (índice) está esa columna en nuestra lista
+                    if columna_identity in columnas_sql:
+                        idx_identity = columnas_sql.index(columna_identity)
+
+                if tiene_identity:
+                    if forzar_identity:
+                        self.log(f"🔓 Candado abierto para inyectar IDs en '{columna_identity}'.")
+                        cursor.execute(f"SET IDENTITY_INSERT {esquema}.{tabla} ON")
+                    else:
+                        self.log(f"⏭️ Ignorando IDs del CSV. SQL Server auto-generará '{columna_identity}'.")
+                        # AMPUTAMOS la columna de la estructura SQL para que no la espere en el INSERT
+                        if idx_identity != -1:
+                            columnas_sql.pop(idx_identity)
+                            col_count -= 1
+            # ------------------------------------------------
+
+            # 2. Configurar la lectura del CSV con Mapeo Inteligente
             with open(self.archivo_csv, 'r', encoding='utf-8', newline='') as f:
                 first_line = f.readline()
                 delimitador = ','
@@ -1098,13 +1227,30 @@ class AplicacionCargas(ctk.CTk):
 
                 f.seek(0)
                 reader = csv.reader(f, delimiter=delimitador)
-                next(reader, None)
+                
+                # --- MAPEO DINÁMICO (Header-to-SQL) ---
+                encabezados_csv = next(reader, [])
+                # Limpiar encabezados (eliminar BOM oculto y espacios)
+                encabezados_csv = [str(h).strip().replace('\ufeff', '') for h in encabezados_csv]
+
+                mapeo_indices = []
+                for col_sql in columnas_sql:
+                    encontrado = False
+                    for i, h in enumerate(encabezados_csv):
+                        if h.lower() == col_sql.lower():
+                            mapeo_indices.append(i)
+                            encontrado = True
+                            break
+                    if not encontrado:
+                        mapeo_indices.append(-1) # Si la columna SQL no existe en el CSV
+                # ----------------------------------------
 
                 batch_size = 50000
                 total_insertados = 0
                 
                 # --- RAMA 1: LOGICA SQL SERVER ---
                 if tipo_db == "SQL Server":
+                    # Reconstruimos el string de columnas dinámicamente (por si borramos la Identity)
                     placeholders = ",".join(["?"] * col_count)
                     cols_str = ",".join(columnas_sql)
                     insert_query = f"INSERT INTO {esquema}.{tabla} ({cols_str}) VALUES ({placeholders})"
@@ -1114,14 +1260,23 @@ class AplicacionCargas(ctk.CTk):
 
                     batch_data = []
 
-                    for fila in reader:
+                    for fila_cruda in reader:
                         # --- VERIFICACIÓN DE ABORTO ---
                         if self.cancelar_proceso:
                             conn.rollback()
                             self.escribir_auditoria(f"⚠️ PROCESO ABORTADO MANUALMENTE en tabla {tabla}.")
                             raise Exception("Proceso abortado por el usuario.")
-                        
-                        fila_procesada = self._transformar_fila(fila, col_count, columnas_sql, acepta_nulos)
+                            
+                        # --- REORDENAMIENTO AUTOMÁTICO DE COLUMNAS ---
+                        fila_reordenada = []
+                        for idx_csv in mapeo_indices:
+                            if idx_csv != -1 and idx_csv < len(fila_cruda):
+                                fila_reordenada.append(fila_cruda[idx_csv])
+                            else:
+                                fila_reordenada.append("") # Enviar vacío para que SQL decida (NULL/Default)
+                        # ---------------------------------------------
+
+                        fila_procesada = self._transformar_fila(fila_reordenada, col_count, columnas_sql, acepta_nulos)
                         batch_data.append(fila_procesada)
 
                         if len(batch_data) >= batch_size:
@@ -1136,6 +1291,11 @@ class AplicacionCargas(ctk.CTk):
                             except Exception as e_batch:
                                 # 🔍 MODO FRANCOTIRADOR: Buscar la fila exacta del error
                                 self.log("⚠️ Error en bloque masivo. Buscando la fila exacta que causó el problema...")
+
+                                # ---> NUEVAS LÍNEAS DE AVISO AL USUARIO <---
+                                self.log("⏳ Entrando en Modo Depuración. Esto puede tomar hasta un minuto. Por favor, no cierres la app...")
+                                self.after(0, lambda: self.btn_iniciar.configure(text="🔍 RASTREANDO ERROR..."))
+                                # ------------------------------------------
                                 
                                 # 🚑 SALVAVIDAS: Limpiar la transacción abortada
                                 conn.rollback()
@@ -1143,7 +1303,10 @@ class AplicacionCargas(ctk.CTk):
                                 # 🚨 REPARACIÓN ANTI-CRASH: Cerrar el cursor corrupto y crear uno limpio
                                 cursor.close()
                                 cursor_debug = conn.cursor()
-                                
+                               
+                                if tiene_identity and forzar_identity:
+                                    cursor_debug.execute(f"SET IDENTITY_INSERT {esquema}.{tabla} ON")
+
                                 for f_debug in batch_data:
                                     try:
                                         cursor_debug.execute(insert_query, f_debug)
@@ -1172,7 +1335,10 @@ class AplicacionCargas(ctk.CTk):
                             # 🚨 REPARACIÓN ANTI-CRASH: Cerrar el cursor corrupto y crear uno limpio
                             cursor.close()
                             cursor_debug = conn.cursor()
-                            
+
+                            if tiene_identity and forzar_identity:
+                                cursor_debug.execute(f"SET IDENTITY_INSERT {esquema}.{tabla} ON")
+
                             for f_debug in batch_data:
                                 try:
                                     cursor_debug.execute(insert_query, f_debug)
@@ -1236,6 +1402,16 @@ class AplicacionCargas(ctk.CTk):
             else:
                 raise e # Si está en modo silencioso, le pasa el error al Orquestador para que lo atrape
         finally:
+            
+            if 'tiene_identity' in locals() and tiene_identity and forzar_identity:
+                try:
+                    cur_off = conn.cursor()
+                    cur_off.execute(f"SET IDENTITY_INSERT {esquema}.{tabla} OFF")
+                    cur_off.close()
+                except Exception:
+                    pass
+            
+
             if conn: conn.close()
             if not silencioso:
                 self.after(0, lambda: self.btn_iniciar.configure(state="normal", text="🚀 INICIAR CARGA MASIVA"))
@@ -2485,43 +2661,140 @@ class AplicacionCargas(ctk.CTk):
             self.after(0, lambda: self.btn_autodescubrir.configure(state="normal"))
 
     def modal_configurar_llm(self):
+        import requests # Asegurar importación para el descubrimiento
+        
         modal = ctk.CTkToplevel(self)
-        modal.title("Configuración de Agente IA")
-        modal.geometry("400x300")
+        modal.title("Configuración de Agentes IA")
+        modal.geometry("450x450")
         modal.grab_set()
 
+        # 1. URL y Token
         ctk.CTkLabel(modal, text="URL del Endpoint (API):", font=("Arial", 12)).pack(pady=(15,0), padx=20, anchor="w")
-        ent_url = ctk.CTkEntry(modal, width=360, placeholder_text="Ej. https://api.openai.com/v1/chat/completions o http://localhost:11434/v1...")
+        ent_url = ctk.CTkEntry(modal, width=400, placeholder_text="Ej. http://localhost:11434/v1")
         ent_url.pack(pady=5, padx=20)
-        
-        # Pre-llenar si ya existe en config.json
-        url_guardada = self.config_data.get("llm_url", "")
-        if url_guardada: ent_url.insert(0, url_guardada)
+        if self.config_data.get("llm_url"): ent_url.insert(0, self.config_data.get("llm_url"))
 
-        ctk.CTkLabel(modal, text="Token de Autenticación (Opcional para local):", font=("Arial", 12)).pack(pady=(10,0), padx=20, anchor="w")
-        ent_token = ctk.CTkEntry(modal, width=360, show="*")
+        ctk.CTkLabel(modal, text="Token (Opcional para local):", font=("Arial", 12)).pack(pady=(5,0), padx=20, anchor="w")
+        ent_token = ctk.CTkEntry(modal, width=400, show="*")
         ent_token.pack(pady=5, padx=20)
-        
-        token_guardado = self.config_data.get("llm_token", "")
-        if token_guardado: ent_token.insert(0, token_guardado)
-        
-        ctk.CTkLabel(modal, text="Modelo:", font=("Arial", 12)).pack(pady=(10,0), padx=20, anchor="w")
-        ent_modelo = ctk.CTkEntry(modal, width=360, placeholder_text="Ej. gpt-4o-mini, llama3, etc.")
-        ent_modelo.pack(pady=5, padx=20)
-        
-        modelo_guardado = self.config_data.get("llm_modelo", "")
-        if modelo_guardado: ent_modelo.insert(0, modelo_guardado)
+        if self.config_data.get("llm_token"): ent_token.insert(0, self.config_data.get("llm_token"))
 
+        # Cargar lista de modelos guardada en config.json
+        modelos_guardados = self.config_data.get("llm_modelos_disponibles", ["Sin descubrir..."])
+
+        # 2. Contenedor del Modelo Principal (Generador)
+        frame_gen = ctk.CTkFrame(modal, fg_color="transparent")
+        frame_gen.pack(fill="x", padx=20, pady=(10, 0))
+        
+        ctk.CTkLabel(frame_gen, text="Modelo Principal (Generador):", font=("Arial", 12, "bold")).pack(anchor="w")
+        cmb_modelo_gen = ctk.CTkComboBox(frame_gen, values=modelos_guardados, width=300)
+        cmb_modelo_gen.pack(side="left", pady=5)
+        if self.config_data.get("llm_modelo_generador"): cmb_modelo_gen.set(self.config_data.get("llm_modelo_generador"))
+
+        # 3. Contenedor del Modelo Secundario (Evaluador) - Oculto por defecto
+        frame_eval = ctk.CTkFrame(modal, fg_color="transparent")
+        
+        ctk.CTkLabel(frame_eval, text="Modelo Secundario (Auditor):", font=("Arial", 12, "bold"), text_color="#17a2b8").pack(anchor="w")
+        cmb_modelo_eval = ctk.CTkComboBox(frame_eval, values=modelos_guardados, width=300)
+        cmb_modelo_eval.pack(side="left", pady=5)
+        if self.config_data.get("llm_modelo_evaluador"): cmb_modelo_eval.set(self.config_data.get("llm_modelo_evaluador"))
+
+        # Lógica para mostrar/ocultar el evaluador con el botón "+"
+        def toggle_evaluador():
+            if frame_eval.winfo_ismapped():
+                frame_eval.pack_forget()
+                btn_mas_agentes.configure(text="➕ Agregar Modelo Auditor")
+            else:
+                # Insertarlo justo después del generador
+                frame_eval.pack(fill="x", padx=20, pady=(5, 0), after=frame_gen)
+                btn_mas_agentes.configure(text="➖ Quitar Modelo Auditor")
+
+        btn_mas_agentes = ctk.CTkButton(frame_gen, text="➕", width=40, fg_color="#343a40", hover_color="#23272b", command=toggle_evaluador)
+        btn_mas_agentes.pack(side="left", padx=10, pady=5)
+
+        # Si ya había un evaluador guardado, mostrar el panel desde el inicio
+        if self.config_data.get("llm_modelo_evaluador"):
+            toggle_evaluador()
+
+        # 4. Lógica de Descubrimiento Automático
+        def descubrir_modelos():
+            url_input = ent_url.get().strip().rstrip('/')
+            token = ent_token.get().strip()
+            
+            if not url_input:
+                DialogoModerno(self, "Error", "Ingresa una URL primero.", tipo="warning")
+                return
+
+            # --- LÓGICA CORREGIDA PARA TU API ---
+            # Si pegaste la URL completa de completions, la cambiamos al formato de modelos
+            if url_input.endswith("/chat/completions"):
+                endpoint = url_input.replace("/chat/completions", "/models")
+            else:
+                # Si solo pusiste la base (ej. https://genius.c.services/api)
+                endpoint = url_input + "/models"
+                
+            btn_descubrir.configure(state="disabled", text="⏳ Buscando...")
+            modal.update()
+
+            try:
+                headers = {"Accept": "application/json"}
+                if token: headers["Authorization"] = f"Bearer {token}"
+                
+                resp = requests.get(endpoint, headers=headers, timeout=5)
+                resp.raise_for_status()
+                
+                try:
+                    data = resp.json()
+                except json.JSONDecodeError:
+                    DialogoModerno(self, "Formato Incorrecto", f"El servidor no devolvió JSON.\n\nRuta intentada: {endpoint}\n\nRespuesta:\n{resp.text[:100]}...", tipo="warning")
+                    return
+
+                lista_cruda = data.get("data", []) or data.get("models", [])
+                modelos_encontrados = [m.get("id") or m.get("name") for m in lista_cruda if m.get("id") or m.get("name")]
+                
+                if modelos_encontrados:
+                    self.config_data["llm_modelos_disponibles"] = modelos_encontrados
+                    guardar_configuracion(self.config_data)
+                    
+                    cmb_modelo_gen.configure(values=modelos_encontrados)
+                    cmb_modelo_eval.configure(values=modelos_encontrados)
+                    
+                    if not cmb_modelo_gen.get() or cmb_modelo_gen.get() == "Sin descubrir...":
+                        cmb_modelo_gen.set(modelos_encontrados[0])
+                        
+                    self.log_dummy(f"✅ Se encontraron {len(modelos_encontrados)} modelos.")
+                else:
+                    DialogoModerno(self, "Aviso", "Conexión exitosa, pero no se listaron modelos.", tipo="info")
+                    
+            except requests.exceptions.HTTPError as he:
+                DialogoModerno(self, "Error de Endpoint", f"El servidor rechazó la ruta: {endpoint}\n\nDetalle: {he}", tipo="error")
+            except Exception as e:
+                DialogoModerno(self, "Error de red", f"No se pudo conectar al servidor: {e}", tipo="error")
+            finally:
+                btn_descubrir.configure(state="normal", text="🔍 Descubrir Modelos")
+
+        btn_descubrir = ctk.CTkButton(modal, text="🔍 Descubrir Modelos", width=150, fg_color="#17a2b8", hover_color="#138496", command=descubrir_modelos)
+        btn_descubrir.pack(pady=(15, 0))
+
+        # 5. Guardado final
         def guardar_llm():
             self.config_data["llm_url"] = ent_url.get().strip()
             self.config_data["llm_token"] = ent_token.get().strip()
-            self.config_data["llm_modelo"] = ent_modelo.get().strip()
+            self.config_data["llm_modelo_generador"] = cmb_modelo_gen.get().strip()
+            
+            # Si el panel de evaluación está visible, guardamos el modelo, si no, lo borramos
+            if frame_eval.winfo_ismapped():
+                self.config_data["llm_modelo_evaluador"] = cmb_modelo_eval.get().strip()
+            else:
+                self.config_data["llm_modelo_evaluador"] = ""
+                
             guardar_configuracion(self.config_data)
             self.log_dummy("🤖 Configuración del Agente IA guardada exitosamente.")
             modal.destroy()
 
         ctk.CTkButton(modal, text="💾 Guardar Configuración", fg_color="#6f42c1", hover_color="#59339d", command=guardar_llm).pack(pady=20)
-
+    
+    
     def auto_descubrir_con_llm(self, instrucciones_extra=""):
         srv_name = self.cmb_servidores_dummy.get()
         db_name = self.cmb_dbs_dummy.get()
@@ -2541,6 +2814,49 @@ class AplicacionCargas(ctk.CTk):
         threading.Thread(target=self._hilo_llm_descubrimiento, args=(srv_name, db_name, tabla, url, token, modelo, instrucciones_extra), daemon=True).start()
 
 
+
+    # === NUEVA FUNCIÓN: Abstracción de llamadas HTTP para el flujo Multi-Agente ===
+    def _llamar_api_llm(self, url, token, modelo, mensajes, stream=False):
+        import requests
+        import json
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if token: headers["Authorization"] = f"Bearer {token}"
+        
+        # TRUCO MÁGICO: Siempre pedimos stream=True a nivel de red
+        payload = {"model": modelo, "messages": mensajes, "temperature": 0.1, "stream": True}
+        respuesta = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
+        respuesta.raise_for_status()
+        
+        # Si nuestra UI necesita el flujo en vivo (Fase 3), devolvemos el iterador
+        if stream:
+            return respuesta
+            
+        # Si necesitamos el texto interno (Fase 1 y 2), consumimos el stream
+        texto_completo = ""
+        try:
+            for linea in respuesta.iter_lines():
+                if linea:
+                    linea_decodificada = linea.decode('utf-8', errors='ignore').strip()
+                    if linea_decodificada == "data: [DONE]":
+                        break
+                    if linea_decodificada.startswith("data: "):
+                        try:
+                            chunk = json.loads(linea_decodificada[6:])
+                            if "choices" in chunk and len(chunk["choices"]) > 0:
+                                contenido = chunk["choices"][0].get("delta", {}).get("content")
+                                if contenido: 
+                                    texto_completo += str(contenido)
+                        except json.JSONDecodeError:
+                            pass
+        except Exception:
+            # 🛡️ PROTECCIÓN ANTI-TIMEOUT: APIs proxy (Vercel/Cloudflare) cortan 
+            # la conexión abruptamente a los 30 segundos exactos.
+            # Atrapamos el error silenciosamente para devolver el texto parcial/completo
+            # que el modelo haya logrado generar en lugar de crashear la aplicación.
+            pass
+        
+        return texto_completo
+    
     def _hilo_llm_descubrimiento(self, srv_name, db_name, tabla, url_base, token, modelo, instrucciones_extra):
         import requests
         import json
@@ -2614,7 +2930,6 @@ class AplicacionCargas(ctk.CTk):
                 
                 filas_muestra = cursor.fetchall()
                 
-                # Si la tabla es tan pequeña que el 5% de páginas devolvió 0 filas, disparamos el fallback
                 if len(filas_muestra) == 0:
                     raise ValueError("Tabla pequeña")
                     
@@ -2626,7 +2941,6 @@ class AplicacionCargas(ctk.CTk):
                     cursor.execute(f"SELECT * FROM {esquema}.{tabla} ORDER BY RANDOM() LIMIT 100")
                 filas_muestra = cursor.fetchall()
 
-            # Convertimos la muestra a diccionarios
             columnas_nombres = [desc[0] for desc in cursor.description]
             muestra_dicts = []
             for row in filas_muestra:
@@ -2635,13 +2949,11 @@ class AplicacionCargas(ctk.CTk):
 
             contexto_json = json.dumps({
                 "estructura": estructura, 
-                "dependencias_obligatorias": relaciones_fk, # 🧠 Le damos el mapa resuelto
+                "dependencias_obligatorias": relaciones_fk,
                 "datos_muestra": muestra_dicts
             }, indent=2, ensure_ascii=False)
-
-            # === 2. PROMPT MODIFICADO PARA OBLIGAR A LLENAR TODAS LAS COLUMNAS ===
-            # === 2. PROMPT MODIFICADO PARA OBLIGAR A LLENAR TODAS LAS COLUMNAS ===
-            prompt_sistema = """Eres un experto en ingeniería de datos. Tu objetivo es analizar el esquema y la muestra de datos de una tabla, y devolver ÚNICAMENTE reglas de generación de datos dummy para un orquestador en Python.
+            
+            prompt_sistema_base = """Eres un experto en ingeniería de datos. Tu objetivo es analizar el esquema y la muestra de datos de una tabla, y devolver ÚNICAMENTE reglas de generación de datos dummy para un orquestador en Python.
             
             📖 SINTAXIS ESTRICTA (Si usas algo fuera de esto, el sistema colapsará):
             • Relación Local (FK)    : columna : tabla.columna
@@ -2660,38 +2972,75 @@ class AplicacionCargas(ctk.CTk):
             4. Devuelve ÚNICAMENTE texto plano, una regla por línea. NO expliques tu respuesta.
             5. CRÍTICO: Si en el JSON se te proporciona un arreglo llamado 'dependencias_obligatorias', ESTÁS OBLIGADO a usar la sintaxis de "Relación Local (FK)" para esas columnas exactas. No intentes usar Faker ni rangos para columnas que son Llaves Foráneas."""
 
-            # Construimos el mensaje del usuario dinámicamente
             mensaje_usuario = f"Genera las reglas lógicas para esta tabla basándote en este esquema y muestra:\n{contexto_json}"
             
             if instrucciones_extra:
                 mensaje_usuario += f"\n\n🛑 REGLAS DE NEGOCIO ESTRICTAS DEL USUARIO:\n{instrucciones_extra}\n(Debes aplicar estas reglas obligatoriamente por encima de tus suposiciones)."
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0",
-                "Connection": "keep-alive"
-            }
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
 
-            # === 3. ACTIVAMOS MODO STREAMING ===
-            payload = {
-                "model": modelo,
-                "messages": [
-                    {"role": "system", "content": prompt_sistema},
+            # === VERIFICAR SI HAY EVALUADOR CONFIGURADO ===
+            modelo_evaluador = self.config_data.get("llm_modelo_evaluador", "")
+            
+            # Si hay un evaluador configurado, usamos el flujo Multi-Agente
+            if modelo_evaluador:
+                # ==========================================
+                # FASE 1: GENERACIÓN DEL BORRADOR
+                # ==========================================
+                self.log_dummy(f"🤖 Fase 1: {modelo} está redactando el borrador inicial...")
+                mensajes_fase1 = [
+                    {"role": "system", "content": prompt_sistema_base},
                     {"role": "user", "content": mensaje_usuario}
-                ],
-                "temperature": 0.1,
-                "stream": True 
-            }
+                ]
+                borrador = self._llamar_api_llm(url, token, modelo, mensajes_fase1, stream=False)
+                
+                # ==========================================
+                # FASE 2: EVALUACIÓN Y CRÍTICA
+                # ==========================================
+                self.log_dummy(f"🕵️ Fase 2: {modelo_evaluador} está auditando las reglas...")
+                
+                # Le decimos al auditor que también debe revisar las reglas del usuario
+                prompt_auditor = """Eres un auditor estricto de calidad de datos. Revisa las reglas generadas contra el esquema proporcionado. 
+                Verifica: 
+                1. Que no falte ninguna columna.
+                2. Que se respeten las dependencias obligatorias.
+                3. Que la sintaxis sea estrictamente válida.
+                4. Que se hayan cumplido las REGLAS DE NEGOCIO DEL USUARIO (si existen).
+                Apunta los errores de forma directa. Si todo es perfecto, responde 'SIN ERRORES'."""
+                
+                # Armamos el texto que va a leer el auditor
+                texto_auditoria = f"ESQUEMA ORIGINAL:\n{contexto_json}\n"
+                
+                # Si el usuario escribió un prompt personalizado, se lo pasamos al auditor
+                if instrucciones_extra:
+                    texto_auditoria += f"\n🛑 REGLAS DE NEGOCIO DEL USUARIO A VERIFICAR OBLIGATORIAMENTE:\n{instrucciones_extra}\n"
+                    
+                texto_auditoria += f"\nREGLAS GENERADAS POR EL MODELO ANTERIOR (Borrador):\n{borrador}\n\nEVALUACIÓN Y CRITICA:"
+                
+                mensajes_fase2 = [
+                    {"role": "system", "content": prompt_auditor},
+                    {"role": "user", "content": texto_auditoria}
+                ]
+                
+                critica = self._llamar_api_llm(url, token, modelo_evaluador, mensajes_fase2, stream=False)
+                
+                # ==========================================
+                # FASE 3: REFINAMIENTO Y STREAMING A INTERFAZ
+                # ==========================================
+                self.log_dummy(f"✨ Fase 3: {modelo} está aplicando correcciones y enviando versión final...")
+                mensajes_finales = mensajes_fase1 + [
+                    {"role": "assistant", "content": borrador},
+                    {"role": "user", "content": f"Un auditor revisó tu trabajo y comentó lo siguiente:\n{critica}\n\nPor favor, corrige los errores y genera la VERSIÓN FINAL. Recuerda imprimir SOLO las reglas en texto plano."}
+                ]
+            else:
+                # Si no hay evaluador, usamos el flujo normal (1 solo paso)
+                self.log_dummy(f"🧠 Enviando contexto a {modelo} (Leyendo flujo de datos...)")
+                mensajes_finales = [
+                    {"role": "system", "content": prompt_sistema_base},
+                    {"role": "user", "content": mensaje_usuario}
+                ]
 
-            self.log_dummy("🧠 Enviando contexto al Agente IA (Leyendo flujo de datos...)")
+            # === CONSUMIR LA RESPUESTA (FINAL O ÚNICA) EN STREAMING ===
+            respuesta = self._llamar_api_llm(url, token, modelo, mensajes_finales, stream=True)
             
-            respuesta = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
-            respuesta.raise_for_status() 
-            
-            # === 4. CONSUMIR LA RESPUESTA GOTA A GOTA ===
             reglas_ia = ""
             raw_debug = "" 
             
@@ -2711,31 +3060,46 @@ class AplicacionCargas(ctk.CTk):
                                 chunk = json.loads(linea_decodificada[6:])
                                 if "choices" in chunk and len(chunk["choices"]) > 0:
                                     delta = chunk["choices"][0].get("delta", {})
-                                    
                                     contenido = delta.get("content")
-                                    if contenido: 
-                                        reglas_ia += str(contenido)
-                                        
+                                    if contenido: reglas_ia += str(contenido)
                             except json.JSONDecodeError:
                                 pass 
             except Exception as error_lectura:
                 # 🤫 SILENCIAMOS EL ERROR DE RED SI YA OBTUVIMOS LAS REGLAS
                 if not reglas_ia.strip():
-                    self.log_dummy(f"⚠️ Error de lectura de red: {error_lectura}")
+                    msg_err = f"⚠️ Error de lectura de red: {error_lectura}"
+                    self.log_dummy(msg_err)
+                    self.escribir_auditoria(f"[ERROR AGENTE IA] {msg_err}")
 
-            # === 5. INYECTAR DATOS SALVADOS O MOSTRAR EL DEBUG ===
+            # === INYECTAR DATOS SALVADOS O MOSTRAR EL DEBUG ===
             if reglas_ia.strip():
                 self.after(0, lambda: self._inyectar_reglas_ia(reglas_ia.strip(), orden_columnas))
             else:
                 self.log_dummy(f"🕵️ RESPUESTA CRUDA DEL SERVIDOR:\n{raw_debug}")
                 self.log_dummy("⚠️ El formato no coincide. Es posible que el modelo solo haya devuelto 'reasoning_content' y no la respuesta final.")
+                
+                # --- NUEVO: Escribir el error detallado en el log diario ---
+                mensaje_log_archivo = (
+                    f"\n{'='*55}\n"
+                    f"[ERROR AGENTE IA - RESPUESTA INCOMPLETA / REASONING]\n"
+                    f"Tabla: {tabla} | Modelo: {modelo}\n"
+                    f"Respuesta cruda del servidor:\n{raw_debug}\n"
+                    f"{'='*55}\n"
+                )
+                self.escribir_auditoria(mensaje_log_archivo)
             
         except requests.exceptions.ReadTimeout:
-            self.log_dummy("❌ Error: El Agente IA tardó demasiado en responder (Timeout).")
+            msg = "❌ Error: El Agente IA tardó demasiado en responder (Timeout)."
+            self.log_dummy(msg)
+            self.escribir_auditoria(f"[ERROR RED IA] {msg}")
         except requests.exceptions.HTTPError as he:
-            self.log_dummy(f"❌ Error HTTP del Agente IA: {he}")
+            msg = f"❌ Error HTTP del Agente IA: {he}"
+            self.log_dummy(msg)
+            self.escribir_auditoria(f"[ERROR RED IA] {msg}")
         except Exception as e:
-            self.log_dummy(f"❌ Error inesperado en conexión: {e}")
+            msg = f"❌ Error inesperado en conexión multi-agente: {e}"
+            self.log_dummy(msg)
+            self.escribir_auditoria(f"[ERROR GLOBAL IA] {msg}")
         finally:
             if conn: conn.close()
 
