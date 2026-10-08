@@ -2164,24 +2164,29 @@ class AplicacionCargas(ctk.CTk):
             return
 
         self.btn_escanear_db.configure(state="disabled", text="⏳ Cargando...")
+        self.btn_forzar_escaneo.configure(state="disabled") # Bloqueamos el otro botón también
         self.update() 
         
         srv = self.obtener_credenciales(srv_name)
         if not srv: 
             self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
+            self.btn_forzar_escaneo.configure(state="normal")
             return
 
+        # 🚀 SOLUCIÓN: Mandamos el escaneo pesado a un hilo en segundo plano
+        threading.Thread(target=self._hilo_escanear_dependencias, args=(srv, srv_name, db_name, usar_cache), daemon=True).start()
 
+    def _hilo_escanear_dependencias(self, srv, srv_name, db_name, usar_cache):
         memoria = cargar_relaciones()
         clave_memoria = f"{srv_name}|{db_name}"
         
-        # Obtener datos usando la llave compuesta o la vieja como respaldo
         datos_db = memoria.get(clave_memoria, memoria.get(db_name, {}))
         conf_global = datos_db.get("_configuracion_global", {})
         
         tablas_ordenadas = []
         niveles = {}
         dependencias = {}
+        volumenes_guardados = {}
 
         # ==========================================
         # 1. INTENTO DE CARGA DESDE LOCAL MEMORY
@@ -2198,7 +2203,6 @@ class AplicacionCargas(ctk.CTk):
         # ==========================================
         else:
             self.log_global(f"🔍 Iniciando escaneo profundo de la BD '{db_name}'...")
-            self.update()
             conn = None
             try:
                 conn = self.conectar_db(srv, db_name)
@@ -2211,7 +2215,6 @@ class AplicacionCargas(ctk.CTk):
                 todas_tablas = [row[0].lower() for row in cursor.fetchall()]
 
                 self.log_global(f"Mapeando llaves foráneas para {len(todas_tablas)} tablas...")
-                self.update()
 
                 dependencias = {t: [] for t in todas_tablas}
                 if srv["tipo"] == "SQL Server":
@@ -2223,7 +2226,6 @@ class AplicacionCargas(ctk.CTk):
                 self.arbol_dependencias = dependencias 
 
                 self.log_global("Calculando Topological Sort...")
-                self.update()
                 
                 tablas_restantes = set(todas_tablas)
                 nivel_actual = 0
@@ -2243,7 +2245,7 @@ class AplicacionCargas(ctk.CTk):
                 tablas_ordenadas = sorted(niveles.keys(), key=lambda t: niveles[t])
                 volumenes_guardados = conf_global.get("volumen_registros", {})
 
-                # GUARDAR EN LOCAL MEMORY PARA FUTURAS CARGAS RÁPIDAS
+                # GUARDAR EN LOCAL MEMORY
                 if clave_memoria not in memoria: 
                     memoria[clave_memoria] = {"_configuracion_global": {}, "tablas": {}}
                 memoria[clave_memoria]["_configuracion_global"]["orden_ejecucion"] = tablas_ordenadas
@@ -2254,16 +2256,21 @@ class AplicacionCargas(ctk.CTk):
 
             except Exception as e:
                 self.log_global(f"❌ Error escaneando dependencias: {e}")
-                self.btn_escanear_db.configure(state="normal", text="⚡ Cargar Árbol (Caché)")
+                self.after(0, lambda: self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan"))
+                self.after(0, lambda: self.btn_forzar_escaneo.configure(state="normal"))
                 return
             finally:
                 if conn: conn.close()
 
-        # ==========================================
-        # 3. RENDERIZADO DE INTERFAZ
-        # ==========================================
-        for idx, tabla in enumerate(tablas_ordenadas):
+        # 🚀 SOLUCIÓN 2: Enviamos la creación de la interfaz de regreso al Hilo Principal pero de forma PROGRESIVA
+        self.after(0, lambda: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, 0))
 
+    def _renderizar_ui_progresiva(self, tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, start_idx, chunk_size=25):
+        # Renderizamos un bloque de 25 tablas a la vez para no congelar la ventana
+        end_idx = min(start_idx + chunk_size, len(tablas_ordenadas))
+
+        for idx in range(start_idx, end_idx):
+            tabla = tablas_ordenadas[idx]
             clave_maestra = f"{srv_name}|{db_name}|{tabla}"
 
             if clave_maestra in self.inputs_volumen:
@@ -2272,7 +2279,6 @@ class AplicacionCargas(ctk.CTk):
             row_frame = ctk.CTkFrame(self.scroll_orquestador, fg_color=("#333333" if idx % 2 == 0 else "#2a2a2a"))
             row_frame.pack(fill="x", pady=2, padx=5)
             
-            # Usar .get(tabla, 0) por si el nivel no existe en alguna migración
             ctk.CTkLabel(row_frame, text=f"Lvl {niveles.get(tabla, 0)}", width=40, font=("Arial", 11, "bold"), text_color="#17a2b8").pack(side="left", padx=10)
             ctk.CTkLabel(row_frame, text=f"[{db_name}]", font=("Arial", 10, "italic"), text_color="#f39c12", width=80, anchor="w").pack(side="left")
             ctk.CTkLabel(row_frame, text=tabla, width=180, anchor="w").pack(side="left", padx=5)
@@ -2299,12 +2305,18 @@ class AplicacionCargas(ctk.CTk):
             cmb_modo.configure(command=lambda m, e=ent_vol: toggle_volumen(m, e))
             toggle_volumen(modo_actual) 
             
-            # NUEVO: Guardamos la referencia usando la clave maestra
             self.inputs_volumen[clave_maestra] = {"entry": ent_vol, "modo": cmb_modo_var, "nivel": niveles.get(tabla, 0), "frame": row_frame, "srv_name": srv_name, "db_name": db_name, "tabla": tabla}
 
-        self.log_global(f"✅ Agregado: {db_name} ({len(tablas_ordenadas)} tablas).")
-        self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
-    
+        # Si aún faltan tablas por procesar, le decimos a Tkinter que haga una micropausa de 5 milisegundos 
+        # y dibuje el siguiente bloque. Esto evita que salga el mensaje de "No Responde".
+        if end_idx < len(tablas_ordenadas):
+            self.after(5, lambda: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, end_idx, chunk_size))
+        else:
+            # Una vez que termina de dibujar el último bloque, liberamos los botones.
+            self.log_global(f"✅ Agregado: {db_name} ({len(tablas_ordenadas)} tablas).")
+            self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
+            self.btn_forzar_escaneo.configure(state="normal")
+
     def ejecutar_orquestador(self):
         import re
         if not getattr(self, 'inputs_volumen', None):
@@ -2780,6 +2792,7 @@ class AplicacionCargas(ctk.CTk):
         def guardar_llm():
             self.config_data["llm_url"] = ent_url.get().strip()
             self.config_data["llm_token"] = ent_token.get().strip()
+            self.config_data["llm_modelo"] = cmb_modelo_gen.get().strip()
             self.config_data["llm_modelo_generador"] = cmb_modelo_gen.get().strip()
             
             # Si el panel de evaluación está visible, guardamos el modelo, si no, lo borramos
