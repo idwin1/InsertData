@@ -1497,7 +1497,9 @@ class AplicacionCargas(ctk.CTk):
                 
         threading.Thread(target=cargar, daemon=True).start()
 
+
     def limpiar_orquestador(self):
+        self.abortar_render = True # 🛑 Detiene el dibujado progresivo si estaba corriendo
         for widget in self.scroll_orquestador.winfo_children():
             widget.destroy()
         self.inputs_volumen.clear()
@@ -2153,6 +2155,7 @@ class AplicacionCargas(ctk.CTk):
                 self.after(0, lambda: self.btn_generar_dummy.configure(state="normal", text="🎲 Generar CSV Dummy"))
 
     def escanear_dependencias(self, usar_cache=True):
+        self.abortar_render = False # Reseteamos el candado para permitir dibujar
         db_name = self.cmb_dbs_global.get()
         srv_name = self.cmb_servidores_global.get()
 
@@ -2176,144 +2179,157 @@ class AplicacionCargas(ctk.CTk):
         # 🚀 SOLUCIÓN: Mandamos el escaneo pesado a un hilo en segundo plano
         threading.Thread(target=self._hilo_escanear_dependencias, args=(srv, srv_name, db_name, usar_cache), daemon=True).start()
 
+
     def _hilo_escanear_dependencias(self, srv, srv_name, db_name, usar_cache):
-        memoria = cargar_relaciones()
-        clave_memoria = f"{srv_name}|{db_name}"
-        
-        datos_db = memoria.get(clave_memoria, memoria.get(db_name, {}))
-        conf_global = datos_db.get("_configuracion_global", {})
-        
-        tablas_ordenadas = []
-        niveles = {}
-        dependencias = {}
-        volumenes_guardados = {}
-
-        # ==========================================
-        # 1. INTENTO DE CARGA DESDE LOCAL MEMORY
-        # ==========================================
-        if usar_cache and conf_global.get("orden_ejecucion") and conf_global.get("arbol_dependencias"):
-            self.log_global("⚡ Cargando estructura instantáneamente desde Local Memory...")
-            tablas_ordenadas = conf_global["orden_ejecucion"]
-            self.arbol_dependencias = conf_global["arbol_dependencias"]
-            niveles = conf_global.get("niveles", {})
-            volumenes_guardados = conf_global.get("volumen_registros", {})
+        try:
+            memoria = cargar_relaciones()
+            clave_memoria = f"{srv_name}|{db_name}"
             
-        # ==========================================
-        # 2. ESCANEO PROFUNDO A LA BASE DE DATOS
-        # ==========================================
-        else:
-            self.log_global(f"🔍 Iniciando escaneo profundo de la BD '{db_name}'...")
-            conn = None
-            try:
-                conn = self.conectar_db(srv, db_name)
-                cursor = conn.cursor()
-                
-                if srv["tipo"] == "SQL Server":
-                    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo'")
-                else:
-                    cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-                todas_tablas = [row[0].lower() for row in cursor.fetchall()]
+            datos_db = memoria.get(clave_memoria, memoria.get(db_name, {}))
+            conf_global = datos_db.get("_configuracion_global", {})
+            
+            tablas_ordenadas = []
+            niveles = {}
+            volumenes_guardados = {}
 
-                self.log_global(f"Mapeando llaves foráneas para {len(todas_tablas)} tablas...")
-
-                dependencias = {t: [] for t in todas_tablas}
-                if srv["tipo"] == "SQL Server":
-                    cursor.execute("SELECT t1.name AS Tabla, t2.name AS TablaRef FROM sys.foreign_keys fk INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id")
-                    for tabla, tabla_ref in cursor.fetchall():
-                        if tabla.lower() != tabla_ref.lower():
-                            dependencias[tabla.lower()].append(tabla_ref.lower())
-                
-                self.arbol_dependencias = dependencias 
-
-                self.log_global("Calculando Topological Sort...")
-                
-                tablas_restantes = set(todas_tablas)
-                nivel_actual = 0
-                
-                while tablas_restantes:
-                    tablas_listas = [t for t in tablas_restantes if all(d not in tablas_restantes for d in dependencias.get(t, []))]
-                    
-                    if not tablas_listas:
-                        self.log_global("⚠️ Dependencia circular detectada. Resolviendo forzosamente.")
-                        tablas_listas = list(tablas_restantes)
-                    
-                    for t in tablas_listas:
-                        niveles[t] = nivel_actual
-                        tablas_restantes.remove(t)
-                    nivel_actual += 1
-
-                tablas_ordenadas = sorted(niveles.keys(), key=lambda t: niveles[t])
+            # 1. CARGA DESDE MEMORIA
+            if usar_cache and conf_global.get("orden_ejecucion") and conf_global.get("arbol_dependencias"):
+                self.log_global("⚡ Cargando estructura instantáneamente desde Local Memory...")
+                tablas_ordenadas = conf_global["orden_ejecucion"]
+                self.arbol_dependencias = conf_global["arbol_dependencias"]
+                niveles = conf_global.get("niveles", {})
                 volumenes_guardados = conf_global.get("volumen_registros", {})
+                
+            # 2. ESCANEO PROFUNDO
+            else:
+                self.log_global(f"🔍 Iniciando escaneo profundo de la BD '{db_name}'...")
+                conn = None
+                try:
+                    conn = self.conectar_db(srv, db_name)
+                    cursor = conn.cursor()
+                    
+                    if srv["tipo"] == "SQL Server":
+                        cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo'")
+                    else:
+                        cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                    todas_tablas = [row[0].lower() for row in cursor.fetchall()]
 
-                # GUARDAR EN LOCAL MEMORY
-                if clave_memoria not in memoria: 
-                    memoria[clave_memoria] = {"_configuracion_global": {}, "tablas": {}}
-                memoria[clave_memoria]["_configuracion_global"]["orden_ejecucion"] = tablas_ordenadas
-                memoria[clave_memoria]["_configuracion_global"]["arbol_dependencias"] = dependencias
-                memoria[clave_memoria]["_configuracion_global"]["niveles"] = niveles
-                guardar_relaciones(memoria)
-                self.log_global("💾 Estructura guardada en Caché Local exitosamente.")
+                    self.log_global(f"Mapeando llaves foráneas para {len(todas_tablas)} tablas...")
 
-            except Exception as e:
-                self.log_global(f"❌ Error escaneando dependencias: {e}")
-                self.after(0, lambda: self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan"))
-                self.after(0, lambda: self.btn_forzar_escaneo.configure(state="normal"))
-                return
-            finally:
-                if conn: conn.close()
+                    dependencias = {t: [] for t in todas_tablas}
+                    if srv["tipo"] == "SQL Server":
+                        cursor.execute("SELECT t1.name AS Tabla, t2.name AS TablaRef FROM sys.foreign_keys fk INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id")
+                        for tabla, tabla_ref in cursor.fetchall():
+                            if tabla.lower() != tabla_ref.lower():
+                                dependencias[tabla.lower()].append(tabla_ref.lower())
+                    
+                    self.arbol_dependencias = dependencias 
+                    self.log_global("Calculando Topological Sort...")
+                    
+                    tablas_restantes = set(todas_tablas)
+                    nivel_actual = 0
+                    
+                    while tablas_restantes:
+                        tablas_listas = [t for t in tablas_restantes if all(d not in tablas_restantes for d in dependencias.get(t, []))]
+                        if not tablas_listas:
+                            tablas_listas = list(tablas_restantes)
+                        
+                        for t in tablas_listas:
+                            niveles[t] = nivel_actual
+                            tablas_restantes.remove(t)
+                        nivel_actual += 1
 
-        # 🚀 SOLUCIÓN 2: Enviamos la creación de la interfaz de regreso al Hilo Principal pero de forma PROGRESIVA
-        self.after(0, lambda: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, 0))
+                    tablas_ordenadas = sorted(niveles.keys(), key=lambda t: niveles[t])
+                    volumenes_guardados = conf_global.get("volumen_registros", {})
+
+                    # GUARDAR EN LOCAL MEMORY
+                    if clave_memoria not in memoria: 
+                        memoria[clave_memoria] = {"_configuracion_global": {}, "tablas": {}}
+                    memoria[clave_memoria]["_configuracion_global"]["orden_ejecucion"] = tablas_ordenadas
+                    memoria[clave_memoria]["_configuracion_global"]["arbol_dependencias"] = dependencias
+                    memoria[clave_memoria]["_configuracion_global"]["niveles"] = niveles
+                    guardar_relaciones(memoria)
+                    self.log_global("💾 Estructura guardada en Caché Local exitosamente.")
+
+                except Exception as e:
+                    self.log_global(f"❌ Error escaneando dependencias: {e}")
+                    self.after(0, lambda: self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan"))
+                    self.after(0, lambda: self.btn_forzar_escaneo.configure(state="normal"))
+                    return
+                finally:
+                    if conn: conn.close()
+
+            # Lanzar renderizado progresivo al hilo principal
+            self.after(0, lambda: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, 0))
+            
+        except Exception as e_fatal:
+            self.log_global(f"❌ Error crítico en hilo de escaneo: {e_fatal}")
+            self.after(0, lambda: self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan"))
+            self.after(0, lambda: self.btn_forzar_escaneo.configure(state="normal"))
 
     def _renderizar_ui_progresiva(self, tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, start_idx, chunk_size=25):
-        # Renderizamos un bloque de 25 tablas a la vez para no congelar la ventana
-        end_idx = min(start_idx + chunk_size, len(tablas_ordenadas))
-
-        for idx in range(start_idx, end_idx):
-            tabla = tablas_ordenadas[idx]
-            clave_maestra = f"{srv_name}|{db_name}|{tabla}"
-
-            if clave_maestra in self.inputs_volumen:
-                continue
-
-            row_frame = ctk.CTkFrame(self.scroll_orquestador, fg_color=("#333333" if idx % 2 == 0 else "#2a2a2a"))
-            row_frame.pack(fill="x", pady=2, padx=5)
+        # 1. SEGURO ANTI-GHOST LOOP: Si se canceló la operación, salimos inmediatamente
+        if getattr(self, 'abortar_render', False):
+            self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
+            self.btn_forzar_escaneo.configure(state="normal")
+            return
             
-            ctk.CTkLabel(row_frame, text=f"Lvl {niveles.get(tabla, 0)}", width=40, font=("Arial", 11, "bold"), text_color="#17a2b8").pack(side="left", padx=10)
-            ctk.CTkLabel(row_frame, text=f"[{db_name}]", font=("Arial", 10, "italic"), text_color="#f39c12", width=80, anchor="w").pack(side="left")
-            ctk.CTkLabel(row_frame, text=tabla, width=180, anchor="w").pack(side="left", padx=5)
+        try:
+            niveles = niveles or {}
+            volumenes_guardados = volumenes_guardados or {}
+            end_idx = min(start_idx + chunk_size, len(tablas_ordenadas))
 
-            btn_reglas = ctk.CTkButton(row_frame, text="📄 Reglas", width=60, height=24, fg_color="#6c757d", hover_color="#5a6268", command=lambda t=tabla, db=db_name, srv=srv_name: self.mostrar_reglas_rapidas(t, db, srv))
-            btn_reglas.pack(side="left", padx=5)
+            for idx in range(start_idx, end_idx):
+                # 2. SANITIZACIÓN ESTRICTA: Evita duplicados por mayúsculas o espacios invisibles
+                tabla = str(tablas_ordenadas[idx]).strip().lower()
+                clave_maestra = f"{srv_name.strip()}|{db_name.strip()}|{tabla}".lower()
 
-            modo_actual = "Solo Lectura" 
-            cmb_modo_var = ctk.StringVar(value=modo_actual)
-            cmb_modo = ctk.CTkOptionMenu(row_frame, values=["Generar", "Solo Lectura", "Ignorar"], variable=cmb_modo_var, width=110, fg_color="#495057", button_color="#343a40")
-            cmb_modo.pack(side="right", padx=15)
-            
-            ent_vol = ctk.CTkEntry(row_frame, width=70)
-            ent_vol.insert(0, str(volumenes_guardados.get(tabla, 100)))
-            ent_vol.pack(side="right", padx=5)
-            ctk.CTkLabel(row_frame, text="Filas:").pack(side="right", padx=0)
-            
-            def toggle_volumen(modo_seleccionado, entry_widget=ent_vol):
-                if modo_seleccionado == "Generar":
-                    entry_widget.configure(state="normal", text_color="#ffffff")
-                else:
-                    entry_widget.configure(state="disabled", text_color="#6c757d")
-            
-            cmb_modo.configure(command=lambda m, e=ent_vol: toggle_volumen(m, e))
-            toggle_volumen(modo_actual) 
-            
-            self.inputs_volumen[clave_maestra] = {"entry": ent_vol, "modo": cmb_modo_var, "nivel": niveles.get(tabla, 0), "frame": row_frame, "srv_name": srv_name, "db_name": db_name, "tabla": tabla}
+                # 3. SEGURO ANTI-DUPLICADOS
+                if clave_maestra in self.inputs_volumen:
+                    continue
 
-        # Si aún faltan tablas por procesar, le decimos a Tkinter que haga una micropausa de 5 milisegundos 
-        # y dibuje el siguiente bloque. Esto evita que salga el mensaje de "No Responde".
-        if end_idx < len(tablas_ordenadas):
-            self.after(5, lambda: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, end_idx, chunk_size))
-        else:
-            # Una vez que termina de dibujar el último bloque, liberamos los botones.
-            self.log_global(f"✅ Agregado: {db_name} ({len(tablas_ordenadas)} tablas).")
+                row_frame = ctk.CTkFrame(self.scroll_orquestador, fg_color=("#333333" if idx % 2 == 0 else "#2a2a2a"))
+                row_frame.pack(fill="x", pady=2, padx=5)
+                
+                ctk.CTkLabel(row_frame, text=f"Lvl {niveles.get(tabla, 0)}", width=40, font=("Arial", 11, "bold"), text_color="#17a2b8").pack(side="left", padx=10)
+                ctk.CTkLabel(row_frame, text=f"[{db_name}]", font=("Arial", 10, "italic"), text_color="#f39c12", width=80, anchor="w").pack(side="left")
+                ctk.CTkLabel(row_frame, text=tabla, width=180, anchor="w").pack(side="left", padx=5)
+
+                btn_reglas = ctk.CTkButton(row_frame, text="📄 Reglas", width=60, height=24, fg_color="#6c757d", hover_color="#5a6268", command=lambda t=tabla, db=db_name, srv=srv_name: self.mostrar_reglas_rapidas(t, db, srv))
+                btn_reglas.pack(side="left", padx=5)
+
+                modo_actual = "Solo Lectura" 
+                cmb_modo_var = ctk.StringVar(value=modo_actual)
+                cmb_modo = ctk.CTkOptionMenu(row_frame, values=["Generar", "Solo Lectura", "Ignorar"], variable=cmb_modo_var, width=110, fg_color="#495057", button_color="#343a40")
+                cmb_modo.pack(side="right", padx=15)
+                
+                ent_vol = ctk.CTkEntry(row_frame, width=70)
+                ent_vol.insert(0, str(volumenes_guardados.get(tabla, 100)))
+                ent_vol.pack(side="right", padx=5)
+                ctk.CTkLabel(row_frame, text="Filas:").pack(side="right", padx=0)
+                
+                def toggle_volumen(modo_seleccionado, entry_widget=ent_vol):
+                    if modo_seleccionado == "Generar":
+                        entry_widget.configure(state="normal", text_color="#ffffff")
+                    else:
+                        entry_widget.configure(state="disabled", text_color="#6c757d")
+                
+                cmb_modo.configure(command=lambda m, e=ent_vol: toggle_volumen(m, e))
+                toggle_volumen(modo_actual) 
+                
+                # GUARDAMOS LA REFERENCIA ESTRICTAMENTE EN MINÚSCULAS
+                self.inputs_volumen[clave_maestra] = {"entry": ent_vol, "modo": cmb_modo_var, "nivel": niveles.get(tabla, 0), "frame": row_frame, "srv_name": srv_name, "db_name": db_name, "tabla": tabla}
+
+            # Continuamos el ciclo
+            if end_idx < len(tablas_ordenadas):
+                self.after(5, lambda e=end_idx: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, e, chunk_size))
+            else:
+                self.log_global(f"✅ Agregado: {db_name} ({len(tablas_ordenadas)} tablas).")
+                self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
+                self.btn_forzar_escaneo.configure(state="normal")
+                
+        except Exception as e:
+            self.log_global(f"❌ Error al dibujar la interfaz: {str(e)}")
             self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
             self.btn_forzar_escaneo.configure(state="normal")
 
