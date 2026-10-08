@@ -725,7 +725,6 @@ class AplicacionCargas(ctk.CTk):
             return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db)
 
     def al_seleccionar_servidor(self, display_name):
-        # Bloqueamos la conexión si elige la opción por defecto
         if display_name in ["Seleccione un servidor...", "No hay servidores"]:
             self.cmb_dbs.set("Primero conecte al servidor")
             self.cmb_dbs.configure(values=["Primero conecte al servidor"])
@@ -733,7 +732,10 @@ class AplicacionCargas(ctk.CTk):
             
         srv = self.obtener_credenciales(display_name)
         if not srv: return
+        
+        # Bloqueamos el selector
         self.cmb_dbs.set("Cargando bases de datos...")
+        self.cmb_dbs.configure(state="disabled")
         import threading
         threading.Thread(target=self.cargar_bases_de_datos, args=(srv,), daemon=True).start()
 
@@ -751,21 +753,22 @@ class AplicacionCargas(ctk.CTk):
             dbs = [row[0] for row in cursor.fetchall()]
             
             if dbs:
-                self.cmb_dbs.configure(values=dbs)
-                self.cmb_dbs.set(dbs[0])
-                
-                # NUEVO: Actualizar el selector de la pestaña Ambientación Global
-                self.cmb_dbs_global.configure(values=dbs)
-                self.cmb_dbs_global.set(dbs[0])
-                
-                self.al_seleccionar_db(dbs[0])
+                def actualizar_ui():
+                    self.cmb_dbs.configure(values=dbs, state="normal")
+                    self.cmb_dbs.set(dbs[0])
+                    if hasattr(self, 'cmb_dbs_global'):
+                        self.cmb_dbs_global.configure(values=dbs, state="normal")
+                        self.cmb_dbs_global.set(dbs[0])
+                    self.al_seleccionar_db(dbs[0])
+                self.after(0, actualizar_ui)
             self.log(f"Conectado a {srv['tipo']}: {srv['nombre']}.")
         except Exception as e:
-            self.cmb_dbs.set("Error de conexión")
+            self.after(0, lambda: self.cmb_dbs.set("Error de conexión"))
+            self.after(0, lambda: self.cmb_dbs.configure(state="normal"))
             self.log(f"Error conectando a {srv['ip']}: {e}")
         finally:
             if conn: conn.close()
-
+    
     def al_seleccionar_db(self, db_name):
         srv_name = self.cmb_servidores.get()
         srv = self.obtener_credenciales(srv_name)
@@ -1007,48 +1010,8 @@ class AplicacionCargas(ctk.CTk):
         def actualizar_log():
             self.txt_log_global.insert("end", f"[{hora}] {mensaje}\n")
             self.txt_log_global.see("end")
-        self.after(0, actualizar_log)
-
-    def cambiar_modo_masivo(self, nuevo_modo):
-        # Verifica que ya se haya escaneado el árbol
-        if not getattr(self, 'inputs_volumen', None):
-            return
-            
-        for tabla, controles in self.inputs_volumen.items():
-            # Actualizamos el valor del menú desplegable
-            controles["modo"].set(nuevo_modo)
-            
-            # Bloqueamos o desbloqueamos la caja de texto según el modo
-            if nuevo_modo == "Generar":
-                controles["entry"].configure(state="normal", text_color="#ffffff")
-            else:
-                controles["entry"].configure(state="disabled", text_color="#6c757d")
-                
-        self.log_global(f"🔄 Todas las tablas cambiadas a modo: {nuevo_modo}")
-
-    def aplicar_volumen_masivo(self, volumen_str):
-        if not getattr(self, 'inputs_volumen', None):
-            return
-            
-        if not volumen_str.isdigit():
-            from tkinter import messagebox
-            messagebox.showwarning("Valor Inválido", "Por favor, ingrese un número válido para las filas.")
-            return
-            
-        for tabla, controles in self.inputs_volumen.items():
-            # Si la caja está bloqueada (Solo Lectura), la desbloqueamos un segundo para poder inyectar el texto
-            estado_actual = controles["entry"].cget("state")
-            if estado_actual == "disabled":
-                controles["entry"].configure(state="normal")
-            
-            controles["entry"].delete(0, 'end')
-            controles["entry"].insert(0, volumen_str)
-            
-            # La regresamos a su estado original (bloqueada o normal)
-            if estado_actual == "disabled":
-                controles["entry"].configure(state="disabled")
-                
-        self.log_global(f"🔄 Volumen de {volumen_str} filas aplicado a todas las tablas.")
+        self.after(0, actualizar_log)     
+             
     # ==========================================
     # MODAL PARA NUEVO SERVIDOR
     # ==========================================
@@ -1475,7 +1438,10 @@ class AplicacionCargas(ctk.CTk):
             
         srv = self.obtener_credenciales(display_name)
         if not srv: return
+        
+        # Bloqueamos el selector mientras carga
         self.cmb_dbs_global.set("Cargando BDs...")
+        self.cmb_dbs_global.configure(state="disabled")
         
         def cargar():
             conn = None
@@ -1487,16 +1453,20 @@ class AplicacionCargas(ctk.CTk):
                 else:
                     cursor.execute("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname")
                 dbs = [row[0] for row in cursor.fetchall()]
+                
                 if dbs:
-                    self.cmb_dbs_global.configure(values=dbs)
-                    self.cmb_dbs_global.set(dbs[0])
+                    # Inyectamos a la UI de forma segura en el hilo principal
+                    def actualizar_ui():
+                        self.cmb_dbs_global.configure(values=dbs, state="normal")
+                        self.cmb_dbs_global.set(dbs[0])
+                    self.after(0, actualizar_ui)
             except Exception as e:
                 self.log_global(f"Error cargando BDs globales: {e}")
+                self.after(0, lambda: self.cmb_dbs_global.configure(state="normal"))
             finally:
                 if conn: conn.close()
                 
         threading.Thread(target=cargar, daemon=True).start()
-
 
     def limpiar_orquestador(self):
         self.abortar_render = True # 🛑 Detiene el dibujado progresivo si estaba corriendo
@@ -1516,10 +1486,12 @@ class AplicacionCargas(ctk.CTk):
             
         srv = self.obtener_credenciales(display_name)
         if not srv: return
+        
+        # Bloqueamos el selector
         self.cmb_dbs_dummy.set("Cargando bases de datos...")
+        self.cmb_dbs_dummy.configure(state="disabled")
         import threading
         
-        # Usamos un hilo para cargar la BD en el combobox correcto
         def cargar():
             conn = None
             try:
@@ -1532,15 +1504,17 @@ class AplicacionCargas(ctk.CTk):
                     
                 dbs = [row[0] for row in cursor.fetchall()]
                 if dbs:
-                    self.cmb_dbs_dummy.configure(values=dbs)
-                    self.cmb_dbs_dummy.set(dbs[0])
-                    
-                    # NUEVO: Actualizar el selector de la pestaña Ambientación Global
-                    self.cmb_dbs_global.configure(values=dbs)
-                    self.cmb_dbs_global.set(dbs[0])
+                    def actualizar_ui():
+                        self.cmb_dbs_dummy.configure(values=dbs, state="normal")
+                        self.cmb_dbs_dummy.set(dbs[0])
+                        if hasattr(self, 'cmb_dbs_global'):
+                            self.cmb_dbs_global.configure(values=dbs, state="normal")
+                            self.cmb_dbs_global.set(dbs[0])
+                    self.after(0, actualizar_ui)
                 self.log_dummy(f"Conectado a {srv['tipo']}: {srv['nombre']}.")
             except Exception as e:
-                self.cmb_dbs_dummy.set("Error de conexión")
+                self.after(0, lambda: self.cmb_dbs_dummy.set("Error de conexión"))
+                self.after(0, lambda: self.cmb_dbs_dummy.configure(state="normal"))
                 self.log_dummy(f"Error conectando: {e}")
             finally:
                 if conn: conn.close()
@@ -2184,7 +2158,6 @@ class AplicacionCargas(ctk.CTk):
         try:
             memoria = cargar_relaciones()
             clave_memoria = f"{srv_name}|{db_name}"
-            
             datos_db = memoria.get(clave_memoria, memoria.get(db_name, {}))
             conf_global = datos_db.get("_configuracion_global", {})
             
@@ -2192,31 +2165,26 @@ class AplicacionCargas(ctk.CTk):
             niveles = {}
             volumenes_guardados = {}
 
-            # 1. CARGA DESDE MEMORIA
             if usar_cache and conf_global.get("orden_ejecucion") and conf_global.get("arbol_dependencias"):
-                self.log_global("⚡ Cargando estructura instantáneamente desde Local Memory...")
+                self.log_global("⚡ Cargando estructura desde Local Memory...")
                 tablas_ordenadas = conf_global["orden_ejecucion"]
                 self.arbol_dependencias = conf_global["arbol_dependencias"]
                 niveles = conf_global.get("niveles", {})
                 volumenes_guardados = conf_global.get("volumen_registros", {})
-                
-            # 2. ESCANEO PROFUNDO
             else:
                 self.log_global(f"🔍 Iniciando escaneo profundo de la BD '{db_name}'...")
                 conn = None
                 try:
                     conn = self.conectar_db(srv, db_name)
                     cursor = conn.cursor()
-                    
                     if srv["tipo"] == "SQL Server":
                         cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo'")
                     else:
                         cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                    
                     todas_tablas = [row[0].lower() for row in cursor.fetchall()]
-
-                    self.log_global(f"Mapeando llaves foráneas para {len(todas_tablas)} tablas...")
-
                     dependencias = {t: [] for t in todas_tablas}
+                    
                     if srv["tipo"] == "SQL Server":
                         cursor.execute("SELECT t1.name AS Tabla, t2.name AS TablaRef FROM sys.foreign_keys fk INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id")
                         for tabla, tabla_ref in cursor.fetchall():
@@ -2224,16 +2192,12 @@ class AplicacionCargas(ctk.CTk):
                                 dependencias[tabla.lower()].append(tabla_ref.lower())
                     
                     self.arbol_dependencias = dependencias 
-                    self.log_global("Calculando Topological Sort...")
-                    
                     tablas_restantes = set(todas_tablas)
                     nivel_actual = 0
                     
                     while tablas_restantes:
                         tablas_listas = [t for t in tablas_restantes if all(d not in tablas_restantes for d in dependencias.get(t, []))]
-                        if not tablas_listas:
-                            tablas_listas = list(tablas_restantes)
-                        
+                        if not tablas_listas: tablas_listas = list(tablas_restantes)
                         for t in tablas_listas:
                             niveles[t] = nivel_actual
                             tablas_restantes.remove(t)
@@ -2242,15 +2206,12 @@ class AplicacionCargas(ctk.CTk):
                     tablas_ordenadas = sorted(niveles.keys(), key=lambda t: niveles[t])
                     volumenes_guardados = conf_global.get("volumen_registros", {})
 
-                    # GUARDAR EN LOCAL MEMORY
-                    if clave_memoria not in memoria: 
-                        memoria[clave_memoria] = {"_configuracion_global": {}, "tablas": {}}
+                    if clave_memoria not in memoria: memoria[clave_memoria] = {"_configuracion_global": {}, "tablas": {}}
                     memoria[clave_memoria]["_configuracion_global"]["orden_ejecucion"] = tablas_ordenadas
                     memoria[clave_memoria]["_configuracion_global"]["arbol_dependencias"] = dependencias
                     memoria[clave_memoria]["_configuracion_global"]["niveles"] = niveles
                     guardar_relaciones(memoria)
                     self.log_global("💾 Estructura guardada en Caché Local exitosamente.")
-
                 except Exception as e:
                     self.log_global(f"❌ Error escaneando dependencias: {e}")
                     self.after(0, lambda: self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan"))
@@ -2259,79 +2220,87 @@ class AplicacionCargas(ctk.CTk):
                 finally:
                     if conn: conn.close()
 
-            # Lanzar renderizado progresivo al hilo principal
-            self.after(0, lambda: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, 0))
+            # --- NUEVO: GUARDAMOS EN LA MEMORIA VIRTUAL DEL ORQUESTADOR ---
+            self.tablas_orquestador = tablas_ordenadas
+            self.memoria_orquestador = {}
+            for t in tablas_ordenadas:
+                self.memoria_orquestador[t] = {
+                    "srv_name": srv_name,
+                    "db_name": db_name,
+                    "nivel": niveles.get(t, 0),
+                    "modo": "Solo Lectura",
+                    "volumen": str(volumenes_guardados.get(t, 100))
+                }
+
+            # Lanzamos el renderizado de la página 1
+            self.after(0, lambda: self.renderizar_lista_virtual(""))
             
         except Exception as e_fatal:
             self.log_global(f"❌ Error crítico en hilo de escaneo: {e_fatal}")
             self.after(0, lambda: self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan"))
             self.after(0, lambda: self.btn_forzar_escaneo.configure(state="normal"))
 
-    def _renderizar_ui_progresiva(self, tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, start_idx, chunk_size=25):
-        # 1. SEGURO ANTI-GHOST LOOP: Si se canceló la operación, salimos inmediatamente
-        if getattr(self, 'abortar_render', False):
-            self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
-            self.btn_forzar_escaneo.configure(state="normal")
-            return
+    def renderizar_lista_virtual(self, busqueda=""):
+        # 1. Limpiar pantalla para evitar acumulación de menús
+        for widget in self.scroll_orquestador.winfo_children():
+            widget.destroy()
+
+        # 2. Filtrar desde la memoria (No desde la UI)
+        if busqueda:
+            tablas_a_mostrar = [t for t in getattr(self, 'tablas_orquestador', []) if busqueda in t.lower()]
+        else:
+            # Si no hay búsqueda, mostramos todas las "Generar" y rellenamos hasta 100 con las demás
+            activas = [t for t in getattr(self, 'tablas_orquestador', []) if self.memoria_orquestador[t]["modo"] != "Solo Lectura"]
+            inactivas = [t for t in getattr(self, 'tablas_orquestador', []) if self.memoria_orquestador[t]["modo"] == "Solo Lectura"]
+            tablas_a_mostrar = activas + inactivas
+
+        # 🚀 LÍMITE DE PROTECCIÓN: Solo dibujamos un máximo de 50 tablas a la vez en pantalla.
+        # Las demás siguen existiendo en self.memoria_orquestador, pero no consumen gráficos de Windows.
+        limite_ui = tablas_a_mostrar[:50]
+
+        for idx, tabla in enumerate(limite_ui):
+            datos = self.memoria_orquestador[tabla]
             
-        try:
-            niveles = niveles or {}
-            volumenes_guardados = volumenes_guardados or {}
-            end_idx = min(start_idx + chunk_size, len(tablas_ordenadas))
+            row_frame = ctk.CTkFrame(self.scroll_orquestador, fg_color=("#333333" if idx % 2 == 0 else "#2a2a2a"))
+            row_frame.pack(fill="x", pady=2, padx=5)
+            
+            ctk.CTkLabel(row_frame, text=f"Lvl {datos['nivel']}", width=40, font=("Arial", 11, "bold"), text_color="#17a2b8").pack(side="left", padx=10)
+            ctk.CTkLabel(row_frame, text=f"[{datos['db_name']}]", font=("Arial", 10, "italic"), text_color="#f39c12", width=80, anchor="w").pack(side="left")
+            ctk.CTkLabel(row_frame, text=tabla, width=180, anchor="w").pack(side="left", padx=5)
 
-            for idx in range(start_idx, end_idx):
-                # 2. SANITIZACIÓN ESTRICTA: Evita duplicados por mayúsculas o espacios invisibles
-                tabla = str(tablas_ordenadas[idx]).strip().lower()
-                clave_maestra = f"{srv_name.strip()}|{db_name.strip()}|{tabla}".lower()
+            btn_reglas = ctk.CTkButton(row_frame, text="📄 Reglas", width=60, height=24, fg_color="#6c757d", hover_color="#5a6268", command=lambda t=tabla, db=datos['db_name'], srv=datos['srv_name']: self.mostrar_reglas_rapidas(t, db, srv))
+            btn_reglas.pack(side="left", padx=5)
 
-                # 3. SEGURO ANTI-DUPLICADOS
-                if clave_maestra in self.inputs_volumen:
-                    continue
+            cmb_modo_var = ctk.StringVar(value=datos["modo"])
+            cmb_modo = ctk.CTkOptionMenu(row_frame, values=["Generar", "Solo Lectura", "Ignorar"], variable=cmb_modo_var, width=110, fg_color="#495057", button_color="#343a40")
+            cmb_modo.pack(side="right", padx=15)
+            
+            ent_vol = ctk.CTkEntry(row_frame, width=70)
+            ent_vol.insert(0, datos["volumen"])
+            ent_vol.pack(side="right", padx=5)
+            ctk.CTkLabel(row_frame, text="Filas:").pack(side="right", padx=0)
+            
+            # --- EVENTOS DE SINCRONIZACIÓN BIDIRECTONAL (UI <-> Memoria) ---
+            def on_modo_change(m, t=tabla, e=ent_vol):
+                self.memoria_orquestador[t]["modo"] = m
+                if m == "Generar":
+                    e.configure(state="normal", text_color="#ffffff")
+                else:
+                    e.configure(state="disabled", text_color="#6c757d")
 
-                row_frame = ctk.CTkFrame(self.scroll_orquestador, fg_color=("#333333" if idx % 2 == 0 else "#2a2a2a"))
-                row_frame.pack(fill="x", pady=2, padx=5)
-                
-                ctk.CTkLabel(row_frame, text=f"Lvl {niveles.get(tabla, 0)}", width=40, font=("Arial", 11, "bold"), text_color="#17a2b8").pack(side="left", padx=10)
-                ctk.CTkLabel(row_frame, text=f"[{db_name}]", font=("Arial", 10, "italic"), text_color="#f39c12", width=80, anchor="w").pack(side="left")
-                ctk.CTkLabel(row_frame, text=tabla, width=180, anchor="w").pack(side="left", padx=5)
+            def on_vol_change(event, t=tabla, e=ent_vol):
+                self.memoria_orquestador[t]["volumen"] = e.get()
 
-                btn_reglas = ctk.CTkButton(row_frame, text="📄 Reglas", width=60, height=24, fg_color="#6c757d", hover_color="#5a6268", command=lambda t=tabla, db=db_name, srv=srv_name: self.mostrar_reglas_rapidas(t, db, srv))
-                btn_reglas.pack(side="left", padx=5)
+            cmb_modo.configure(command=on_modo_change)
+            ent_vol.bind("<KeyRelease>", on_vol_change)
+            
+            # Aplicar estado inicial
+            on_modo_change(datos["modo"], tabla, ent_vol) 
 
-                modo_actual = "Solo Lectura" 
-                cmb_modo_var = ctk.StringVar(value=modo_actual)
-                cmb_modo = ctk.CTkOptionMenu(row_frame, values=["Generar", "Solo Lectura", "Ignorar"], variable=cmb_modo_var, width=110, fg_color="#495057", button_color="#343a40")
-                cmb_modo.pack(side="right", padx=15)
-                
-                ent_vol = ctk.CTkEntry(row_frame, width=70)
-                ent_vol.insert(0, str(volumenes_guardados.get(tabla, 100)))
-                ent_vol.pack(side="right", padx=5)
-                ctk.CTkLabel(row_frame, text="Filas:").pack(side="right", padx=0)
-                
-                def toggle_volumen(modo_seleccionado, entry_widget=ent_vol):
-                    if modo_seleccionado == "Generar":
-                        entry_widget.configure(state="normal", text_color="#ffffff")
-                    else:
-                        entry_widget.configure(state="disabled", text_color="#6c757d")
-                
-                cmb_modo.configure(command=lambda m, e=ent_vol: toggle_volumen(m, e))
-                toggle_volumen(modo_actual) 
-                
-                # GUARDAMOS LA REFERENCIA ESTRICTAMENTE EN MINÚSCULAS
-                self.inputs_volumen[clave_maestra] = {"entry": ent_vol, "modo": cmb_modo_var, "nivel": niveles.get(tabla, 0), "frame": row_frame, "srv_name": srv_name, "db_name": db_name, "tabla": tabla}
-
-            # Continuamos el ciclo
-            if end_idx < len(tablas_ordenadas):
-                self.after(5, lambda e=end_idx: self._renderizar_ui_progresiva(tablas_ordenadas, niveles, volumenes_guardados, srv_name, db_name, e, chunk_size))
-            else:
-                self.log_global(f"✅ Agregado: {db_name} ({len(tablas_ordenadas)} tablas).")
-                self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
-                self.btn_forzar_escaneo.configure(state="normal")
-                
-        except Exception as e:
-            self.log_global(f"❌ Error al dibujar la interfaz: {str(e)}")
-            self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
-            self.btn_forzar_escaneo.configure(state="normal")
+        self.btn_escanear_db.configure(state="normal", text="➕ Agregar al Plan")
+        self.btn_forzar_escaneo.configure(state="normal")
+        if not busqueda:
+            self.log_global(f"✅ Agregado correctamente. Mostrando 50 tablas (Usa el buscador para ver las demás).")
 
     def ejecutar_orquestador(self):
         import re
@@ -2339,26 +2308,26 @@ class AplicacionCargas(ctk.CTk):
             messagebox.showwarning("Atención", "Primero haz clic en 'Escanear Dependencias' para cargar el árbol de tablas.")
             return
 
-        # 1. Recopilar todos los nodos seleccionados para "Generar" (Vértices del grafo)
-        # Usamos la clave maestra: "Srv|DB|Tabla"
+        # 1. Leer directamente de la memoria virtual, incluso de las tablas que no están en pantalla
         nodos_generar = {}
-        for clave, controles in self.inputs_volumen.items():
-            if controles["modo"].get() == "Generar":
+        for tabla, datos in self.memoria_orquestador.items():
+            if datos["modo"] == "Generar":
                 try:
-                    cantidad = int(controles["entry"].get())
+                    cantidad = int(datos["volumen"])
                     if cantidad > 0:
-                        nodos_generar[clave] = {
-                            "srv_name": controles["srv_name"],
-                            "db_name": controles["db_name"],
-                            "tabla": controles["tabla"],
+                        clave_maestra = f"{datos['srv_name']}|{datos['db_name']}|{tabla}".lower()
+                        nodos_generar[clave_maestra] = {
+                            "srv_name": datos["srv_name"],
+                            "db_name": datos["db_name"],
+                            "tabla": tabla,
                             "cantidad": cantidad,
-                            "nivel": controles.get("nivel", 0) # Traemos el nivel calculado localmente
+                            "nivel": datos["nivel"]
                         }
                 except ValueError:
                     pass
                     
         if not nodos_generar:
-            DialogoModerno(self, "Sin acciones", "No hay tablas marcadas para 'Generar' con filas mayores a 0.", tipo="info").obtener_resultado()
+            DialogoModerno(self, "Sin acciones", "No hay tablas marcadas para 'Generar'.", tipo="info").obtener_resultado()
             return
             
         try:
@@ -2514,59 +2483,58 @@ class AplicacionCargas(ctk.CTk):
 
     
     def filtrar_tablas(self, event=None):
-        busqueda = self.ent_buscar_tabla.get().strip().lower()
-        
-        # 1. Ocultar todos primero usando pack_forget()
-        for tabla, controles in self.inputs_volumen.items():
-            controles["frame"].pack_forget()
+        # 1. Si el usuario sigue escribiendo, cancelamos la orden de búsqueda anterior
+        if getattr(self, 'timer_busqueda', None):
+            self.after_cancel(self.timer_busqueda)
             
-        # 2. Volver a empaquetar solo los que coinciden (mantiene el orden original)
-        for tabla, controles in self.inputs_volumen.items():
-            if busqueda in tabla.lower():
-                controles["frame"].pack(fill="x", pady=2, padx=5)
+        # 2. Programamos la búsqueda real para que se ejecute 400 ms DESPUÉS de la última tecla
+        self.timer_busqueda = self.after(600, self._ejecutar_filtro)
+
+    def _ejecutar_filtro(self):
+        # 3. Esta es la función que finalmente actualiza la interfaz
+        busqueda = self.ent_buscar_tabla.get().strip().lower()
+        self.renderizar_lista_virtual(busqueda)
+
 
     def aislar_tabla(self):
         busqueda = self.ent_buscar_tabla.get().strip().lower()
-        if not busqueda:
-            self.log_global("⚠️ Escriba el nombre de una tabla para buscar y aislar.")
-            return
+        if not busqueda or not hasattr(self, 'arbol_dependencias'): return
 
-        if not hasattr(self, 'arbol_dependencias'):
-            self.log_global("⚠️ Primero debe escanear las dependencias.")
-            return
-
-        tablas_objetivo = set()
-        for t in self.inputs_volumen.keys():
-            if busqueda in t.lower():
-                tablas_objetivo.add(t.lower())
-
-        if not tablas_objetivo:
-            self.log_global(f"⚠️ No se encontró ninguna tabla que coincida con '{busqueda}'.")
-            return
+        tablas_objetivo = set([t for t in getattr(self, 'tablas_orquestador', []) if busqueda in t.lower()])
+        if not tablas_objetivo: return
 
         padres_necesarios = set(tablas_objetivo)
         cola = list(tablas_objetivo)
 
         while cola:
             actual = cola.pop(0)
-            padres = self.arbol_dependencias.get(actual, [])
-            for p in padres:
+            for p in self.arbol_dependencias.get(actual, []):
                 if p not in padres_necesarios:
                     padres_necesarios.add(p)
                     cola.append(p)
 
-        # 3. Actualizar UI: SOLO ACTIVAMOS (SUMAMOS), YA NO APAGAMOS LAS DEMÁS
+        # Actualizamos la MEMORIA, no la UI
         for tabla in padres_necesarios:
-            if tabla in self.inputs_volumen:
-                controles = self.inputs_volumen[tabla]
-                controles["modo"].set("Generar")
-                controles["entry"].configure(state="normal", text_color="#ffffff")
+            if tabla in getattr(self, 'memoria_orquestador', {}):
+                self.memoria_orquestador[tabla]["modo"] = "Generar"
 
-        self.log_global(f"🎯 Sumado a Generar: '{busqueda}' y sus dependencias ({len(padres_necesarios)} tablas en total).")
-        
-        # 4. Limpiar el buscador para revelar toda la lista nuevamente
+        self.log_global(f"🎯 Sumado a Generar: '{busqueda}' y sus dependencias.")
         self.ent_buscar_tabla.delete(0, 'end')
-        self.filtrar_tablas()
+        self.renderizar_lista_virtual("") # Refrescamos la UI
+
+    def cambiar_modo_masivo(self, nuevo_modo):
+        if not getattr(self, 'memoria_orquestador', None): return
+        for t in self.memoria_orquestador:
+            self.memoria_orquestador[t]["modo"] = nuevo_modo
+        self.log_global(f"🔄 Todas las tablas cambiadas a modo: {nuevo_modo}")
+        self.renderizar_lista_virtual(self.ent_buscar_tabla.get().strip().lower())
+
+    def aplicar_volumen_masivo(self, volumen_str):
+        if not getattr(self, 'memoria_orquestador', None) or not volumen_str.isdigit(): return
+        for t in self.memoria_orquestador:
+            self.memoria_orquestador[t]["volumen"] = volumen_str
+        self.log_global(f"🔄 Volumen masivo aplicado.")
+        self.renderizar_lista_virtual(self.ent_buscar_tabla.get().strip().lower())
 
     def mostrar_reglas_rapidas(self, tabla, db_name, srv_name):
         memoria = cargar_relaciones()
