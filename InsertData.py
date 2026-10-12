@@ -385,8 +385,12 @@ class AplicacionCargas(ctk.CTk):
         self.cmb_servidores = ctk.CTkComboBox(self.frame_srv, width=280, values=["Seleccione un servidor..."], command=self.al_seleccionar_servidor)
         self.cmb_servidores.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="w")
 
-        btn_nuevo_srv = ctk.CTkButton(self.frame_srv, text="➕ Nuevo Servidor", fg_color="#28a745", hover_color="#218838", command=self.modal_nuevo_servidor)
-        btn_nuevo_srv.grid(row=1, column=1, padx=10, pady=(0, 15), sticky="w")
+        # Ajustamos el botón nuevo y agregamos el de editar
+        btn_nuevo_srv = ctk.CTkButton(self.frame_srv, text="➕ Nuevo", width=100, fg_color="#28a745", hover_color="#218838", command=self.modal_nuevo_servidor)
+        btn_nuevo_srv.grid(row=1, column=1, padx=(10, 5), pady=(0, 15), sticky="w")
+
+        btn_editar_srv = ctk.CTkButton(self.frame_srv, text="✏️ Editar", width=100, fg_color="#f39c12", hover_color="#e67e22", command=self.modal_editar_servidor)
+        btn_editar_srv.grid(row=1, column=2, padx=5, pady=(0, 15), sticky="w")
 
         # --- SECCIÓN 2: BASE DE DATOS Y TABLA ---
         self.frame_db = ctk.CTkFrame(self.tab_carga, fg_color="#2b2b2b", corner_radius=10)
@@ -716,13 +720,19 @@ class AplicacionCargas(ctk.CTk):
 
     def conectar_db(self, srv, db_name=None):
         tipo = srv.get("tipo", "SQL Server")
+        db_inicial = srv.get("db_default", "").strip()
+
         if tipo == "SQL Server":
-            db_part = f"DATABASE={db_name};" if db_name else ""
+            # Si no nos piden una DB específica, usamos la inicial
+            db_destino = db_name if db_name else db_inicial
+            db_part = f"DATABASE={db_destino};" if db_destino else ""
             conn_str = f"DRIVER={{{self.driver_sql}}};SERVER={srv['ip']};{db_part}UID={srv['user']};PWD={srv['pwd']};"
             return pyodbc.connect(conn_str, autocommit=(db_name is None))
+            
         elif tipo == "PostgreSQL":
-            db = db_name if db_name else 'postgres'
-            return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db)
+            # Si no nos piden una DB, usamos la inicial. Si la inicial está vacía, usamos 'postgres' por seguridad
+            db_destino = db_name if db_name else (db_inicial if db_inicial else 'postgres')
+            return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require')
 
     def al_seleccionar_servidor(self, display_name):
         if display_name in ["Seleccione un servidor...", "No hay servidores"]:
@@ -1018,7 +1028,7 @@ class AplicacionCargas(ctk.CTk):
     def modal_nuevo_servidor(self):
         modal = ctk.CTkToplevel(self)
         modal.title("Registrar Servidor")
-        modal.geometry("380x450")
+        modal.geometry("380x520") # <--- Aumentamos la altura
         modal.grab_set()
 
         ctk.CTkLabel(modal, text="Motor de Base de Datos:").pack(pady=(15,0), padx=20, anchor="w")
@@ -1041,13 +1051,19 @@ class AplicacionCargas(ctk.CTk):
         ent_pwd = ctk.CTkEntry(modal, width=300, show="*")
         ent_pwd.pack(pady=5, padx=20)
 
+        # --- NUEVO CAMPO ---
+        ctk.CTkLabel(modal, text="BD Inicial (Opcional - Si tu usuario está restringido):").pack(pady=(10,0), padx=20, anchor="w")
+        ent_db_default = ctk.CTkEntry(modal, width=300, placeholder_text="Ej. corporativo_db")
+        ent_db_default.pack(pady=5, padx=20)
+
         def guardar():
             nuevo = {
                 "tipo": cmb_tipo.get(),
                 "nombre": ent_nombre.get(),
                 "ip": ent_ip.get(),
                 "user": ent_user.get(),
-                "pwd": ent_pwd.get()
+                "pwd": ent_pwd.get(),
+                "db_default": ent_db_default.get().strip() # Guardamos la BD por defecto
             }
             if all(nuevo.values()):
                 self.config_data["Servidores_BD"].append(nuevo)
@@ -1059,6 +1075,101 @@ class AplicacionCargas(ctk.CTk):
                 messagebox.showwarning("Incompleto", "Por favor llene todos los campos.")
 
         ctk.CTkButton(modal, text="Guardar", command=guardar).pack(pady=25)
+
+    def modal_editar_servidor(self):
+        display_name = self.cmb_servidores.get()
+        if display_name in ["Seleccione un servidor...", "No hay servidores"]:
+            DialogoModerno(self, "Aviso", "Primero selecciona un servidor de la lista para editarlo.", tipo="warning").obtener_resultado()
+            return
+
+        # Obtener el servidor actual de la memoria
+        srv_actual = self.obtener_credenciales(display_name)
+        if not srv_actual: return
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("Editar Servidor")
+        modal.geometry("400x550") # <--- Aumentamos la altura
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="Motor de Base de Datos:").pack(pady=(15,0), padx=20, anchor="w")
+        cmb_tipo = ctk.CTkOptionMenu(modal, values=["SQL Server", "PostgreSQL"], width=320)
+        cmb_tipo.pack(pady=5, padx=20)
+        cmb_tipo.set(srv_actual.get("tipo", "SQL Server"))
+
+        ctk.CTkLabel(modal, text="Alias (Ej. Producción PgSQL):").pack(pady=(10,0), padx=20, anchor="w")
+        ent_nombre = ctk.CTkEntry(modal, width=320)
+        ent_nombre.pack(pady=5, padx=20)
+        ent_nombre.insert(0, srv_actual.get("nombre", ""))
+
+        ctk.CTkLabel(modal, text="Servidor / IP:").pack(pady=(10,0), padx=20, anchor="w")
+        ent_ip = ctk.CTkEntry(modal, width=320)
+        ent_ip.pack(pady=5, padx=20)
+        ent_ip.insert(0, srv_actual.get("ip", ""))
+
+        ctk.CTkLabel(modal, text="Usuario:").pack(pady=(10,0), padx=20, anchor="w")
+        ent_user = ctk.CTkEntry(modal, width=320)
+        ent_user.pack(pady=5, padx=20)
+        ent_user.insert(0, srv_actual.get("user", ""))
+
+        ctk.CTkLabel(modal, text="Contraseña:").pack(pady=(10,0), padx=20, anchor="w")
+        ent_pwd = ctk.CTkEntry(modal, width=320, show="*")
+        ent_pwd.pack(pady=5, padx=20)
+        ent_pwd.insert(0, srv_actual.get("pwd", ""))
+
+        # --- NUEVO CAMPO ---
+        ctk.CTkLabel(modal, text="BD Inicial (Opcional - Si tu usuario está restringido):").pack(pady=(10,0), padx=20, anchor="w")
+        ent_db_default = ctk.CTkEntry(modal, width=320, placeholder_text="Ej. corporativo_db")
+        ent_db_default.pack(pady=5, padx=20)
+        ent_db_default.insert(0, srv_actual.get("db_default", ""))
+        
+
+        def guardar_edicion():
+            if not all([ent_nombre.get(), ent_ip.get(), ent_user.get(), ent_pwd.get()]):
+                from tkinter import messagebox
+                messagebox.showwarning("Incompleto", "Por favor llene todos los campos.")
+                return
+            
+            # Actualizar el diccionario directamente en memoria
+            srv_actual["tipo"] = cmb_tipo.get()
+            srv_actual["nombre"] = ent_nombre.get()
+            srv_actual["ip"] = ent_ip.get()
+            srv_actual["user"] = ent_user.get()
+            srv_actual["pwd"] = ent_pwd.get()
+            srv_actual["db_default"] = ent_db_default.get().strip() # Guardamos la BD inicial editada
+            
+            guardar_configuracion(self.config_data)
+            self.actualizar_lista_servidores()
+            
+            # Reseleccionar el servidor con su nuevo nombre
+            nuevo_display = f"{srv_actual['nombre']} - {srv_actual['ip']} ({srv_actual['tipo']})"
+            self.cmb_servidores.set(nuevo_display)
+            
+            modal.destroy()
+            self.log(f"Servidor '{srv_actual['nombre']}' actualizado exitosamente.")
+
+        def eliminar_servidor():
+            confirmacion = DialogoModerno(self, "Confirmar Eliminación", f"¿Estás seguro de que deseas borrar el servidor '{srv_actual['nombre']}' permanentemente?", tipo="error", con_cancelar=True).obtener_resultado()
+            if confirmacion:
+                self.config_data["Servidores_BD"].remove(srv_actual)
+                guardar_configuracion(self.config_data)
+                self.actualizar_lista_servidores()
+                
+                # Dejar un estado limpio
+                if len(self.config_data["Servidores_BD"]) > 0:
+                    self.cmb_servidores.set(list(self.mapa_servidores.keys())[0])
+                else:
+                    self.cmb_servidores.set("No hay servidores")
+                    self.cmb_dbs.set("Primero conecte al servidor")
+                    
+                modal.destroy()
+                self.log(f"Servidor eliminado correctamente.")
+
+        # Contenedor para alinear los dos botones
+        frame_btns = ctk.CTkFrame(modal, fg_color="transparent")
+        frame_btns.pack(pady=(20, 0))
+        
+        ctk.CTkButton(frame_btns, text="🗑️ Eliminar", width=140, fg_color="#dc3545", hover_color="#c82333", command=eliminar_servidor).pack(side="left", padx=10)
+        ctk.CTkButton(frame_btns, text="💾 Guardar Cambios", width=140, fg_color="#0056b3", hover_color="#004085", command=guardar_edicion).pack(side="left", padx=10)
 
     # ==========================================
     # CORE: LÓGICA DE CARGA MASIVA (DUAL ENGINE)
