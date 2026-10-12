@@ -1442,15 +1442,25 @@ class AplicacionCargas(ctk.CTk):
                     writer = csv.writer(csv_buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
                     lineas_en_buffer = 0
 
-                    for fila in reader:
+                    for fila_cruda in reader:
                         # --- AGREGAR ESTA VERIFICACIÓN AQUÍ TAMBIÉN ---
                         if self.cancelar_proceso:
                             conn.rollback()
                             self.escribir_auditoria(f"⚠️ PROCESO ABORTADO MANUALMENTE en tabla {tabla}.")
                             raise Exception("Proceso abortado por el usuario.")
                         # ----------------------------------------------
-                        # 
-                        fila_procesada = self._transformar_fila(fila, col_count, columnas_sql, acepta_nulos)
+                        
+                        # --- REORDENAMIENTO AUTOMÁTICO DE COLUMNAS (Para PostgreSQL) ---
+                        fila_reordenada = []
+                        for idx_csv in mapeo_indices:
+                            if idx_csv != -1 and idx_csv < len(fila_cruda):
+                                fila_reordenada.append(fila_cruda[idx_csv])
+                            else:
+                                fila_reordenada.append("") # Enviar vacío para que BD decida (NULL/Default)
+                        # ---------------------------------------------
+                        
+                        # Pasamos la fila ya reordenada basándonos en los encabezados
+                        fila_procesada = self._transformar_fila(fila_reordenada, col_count, columnas_sql, acepta_nulos)
                         fila_procesada = ["" if x is None else x for x in fila_procesada]
                         writer.writerow(fila_procesada)
                         lineas_en_buffer += 1
@@ -1461,7 +1471,7 @@ class AplicacionCargas(ctk.CTk):
                             conn.commit()
                             total_insertados += lineas_en_buffer
                             # --- REGISTRO DE AUDITORÍA FISICA ---
-                            self.escribir_auditoria(f"✅ ÉXITO: {len(batch_data)} registros insertados en [{db_name}].{tabla}. Origen de datos: {self.archivo_csv}")
+                            self.escribir_auditoria(f"✅ ÉXITO: {lineas_en_buffer} registros insertados en [{db_name}].{tabla}. Origen de datos: {self.archivo_csv}")
                             self.log(f"Insertados {total_insertados} registros mediante COPY...")
                             
                             csv_buffer.seek(0)
@@ -1474,7 +1484,7 @@ class AplicacionCargas(ctk.CTk):
                         conn.commit()
                         total_insertados += lineas_en_buffer
                         # --- REGISTRO DE AUDITORÍA FISICA ---
-                        self.escribir_auditoria(f"✅ ÉXITO: {len(batch_data)} registros insertados en [{db_name}].{tabla}. Origen de datos: {self.archivo_csv}")
+                        self.escribir_auditoria(f"✅ ÉXITO: {lineas_en_buffer} registros insertados en [{db_name}].{tabla}. Origen de datos: {self.archivo_csv}")
                         
                     csv_buffer.close()
 
