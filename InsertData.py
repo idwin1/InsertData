@@ -718,6 +718,7 @@ class AplicacionCargas(ctk.CTk):
             srv["tipo"] = "SQL Server"
         return srv
 
+
     def conectar_db(self, srv, db_name=None):
         tipo = srv.get("tipo", "SQL Server")
         db_inicial = srv.get("db_default", "").strip()
@@ -732,8 +733,21 @@ class AplicacionCargas(ctk.CTk):
         elif tipo == "PostgreSQL":
             # Si no nos piden una DB, usamos la inicial. Si la inicial está vacía, usamos 'postgres' por seguridad
             db_destino = db_name if db_name else (db_inicial if db_inicial else 'postgres')
-            return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require')
-
+            
+            # --- LÓGICA INTELIGENTE DE CONEXIÓN SSL ---
+            try:
+                # Intento 1: Máxima seguridad (Como pgAdmin)
+                return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require')
+            except psycopg2.OperationalError as e:
+                # Si el servidor rechaza la conexión porque no tiene certificados SSL instalados
+                if "server does not support SSL" in str(e) or "no encryption" in str(e):
+                    self.log(f"⚠️ Servidor sin SSL detectado. Cambiando a conexión estándar...")
+                    # Intento 2: Conexión estándar sin cifrar
+                    return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='disable')
+                else:
+                    # Si es un error de contraseña incorrecta u otro fallo, lo mostramos normal
+                    raise e
+    
     def al_seleccionar_servidor(self, display_name):
         if display_name in ["Seleccione un servidor...", "No hay servidores"]:
             self.cmb_dbs.set("Primero conecte al servidor")
