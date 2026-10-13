@@ -1971,7 +1971,7 @@ class AplicacionCargas(ctk.CTk):
                         fks_data[col_local] = ids
                         self.log_dummy(f" ✅ Relación '{col_local}': {len(ids)} IDs extraídos de '{tabla_ref}'.")
                 except Exception:
-                    pass
+                    conn.rollback() # <--- NUEVO: Limpia el error para no afectar a la siguiente tabla
 
             # =========================================================
             # MOTOR DE REGLAS Y PRE-CARGA DE CATÁLOGOS MAESTROS
@@ -2023,24 +2023,54 @@ class AplicacionCargas(ctk.CTk):
                         continue 
                     
                     # === NUEVO: IDENTIFICAR TABLAS PARA SINCRONIZACIÓN MAESTRA ===
-                    tablas_a_cargar = set()
+                    tablas_a_cargar_especificas = {} # Guardará: tabla -> [columna1, columna2]
                     
                     # 1. Si es una referencia directa tabla.columna
                     if '.' in regla and ',' not in regla and '#' not in regla and '?' not in regla and '[' not in regla and '<<' not in regla:
                         t_ref, c_ref = regla.split('.')
-                        tablas_a_cargar.add(t_ref.strip().lower())
+                        t_ref = t_ref.strip().lower()
+                        tablas_a_cargar_especificas[t_ref] = [c_ref.strip().lower()]
                     
                     # 2. Si es una plantilla con inyección <<tabla.columna>>
                     for t_match, c_match in re.findall(r'<<([^>]+)\.([^>]+)>>', regla):
-                        tablas_a_cargar.add(t_match.strip().lower())
+                        t_ref = t_match.strip().lower()
+                        if t_ref not in tablas_a_cargar_especificas: tablas_a_cargar_especificas[t_ref] = []
+                        tablas_a_cargar_especificas[t_ref].append(c_match.strip().lower())
 
                     # Cargar los catálogos en memoria si no existen
-                    for t_ref in tablas_a_cargar:
+                    for t_ref, columnas_req in tablas_a_cargar_especificas.items():
                         if t_ref not in tablas_maestras:
                             try:
-                                self.log_dummy(f" 📥 Descargando catálogo '{t_ref}' para sincronización correlacionada...")
-                                q_master = f"SELECT TOP 10000 * FROM {esquema}.{t_ref}" if srv["tipo"] == "SQL Server" else f"SELECT * FROM {esquema}.{t_ref} LIMIT 10000"
-                                cursor.execute(q_master)
+                                # TRUCO MAESTRO: Solo extraemos las columnas necesarias
+                                cols_str = ", ".join([f"[{c}]" if srv["tipo"] == "SQL Server" else f'"{c}"' for c in set(columnas_req)])
+                                
+                                # 1. Inteligencia: ¿Cuántos registros tiene la tabla realmente?
+                                cursor.execute(f"SELECT COUNT(*) FROM {esquema}.{t_ref}")
+                                total_filas = cursor.fetchone()[0]
+                                
+                                # 2. Lógica de decisión dinámica
+                                if total_filas <= 100000:
+                                    self.log_dummy(f" 📥 Descargando la tabla completa '{t_ref}' ({total_filas} registros)...")
+                                    q_master = f"SELECT {cols_str} FROM {esquema}.{t_ref}"
+                                else:
+                                    self.log_dummy(f" 📥 Tabla masiva detectada ({total_filas} filas). Extrayendo muestra representativa aleatoria...")
+                                    if srv["tipo"] == "SQL Server":
+                                        # Usamos TABLESAMPLE para leer partes aleatorias del disco ultrarrápido
+                                        q_master = f"SELECT TOP 100000 {cols_str} FROM {esquema}.{t_ref} TABLESAMPLE (20 PERCENT)"
+                                    else:
+                                        q_master = f"SELECT {cols_str} FROM {esquema}.{t_ref} TABLESAMPLE SYSTEM (20) LIMIT 100000"
+
+                                try:
+                                    cursor.execute(q_master)
+                                except Exception:
+                                    # Plan B: Si TABLESAMPLE falla (suele pasar si la tabla es una Vista)
+                                    conn.rollback()
+                                    if srv["tipo"] == "SQL Server":
+                                        q_master = f"SELECT TOP 100000 {cols_str} FROM {esquema}.{t_ref} ORDER BY NEWID()"
+                                    else:
+                                        q_master = f"SELECT {cols_str} FROM {esquema}.{t_ref} ORDER BY RANDOM() LIMIT 100000"
+                                    cursor.execute(q_master)
+                                    
                                 cols_fk = [desc[0].lower() for desc in cursor.description]
                                 filas_fk = []
                                 for row_data in cursor.fetchall():
@@ -2050,7 +2080,8 @@ class AplicacionCargas(ctk.CTk):
                                     tablas_maestras[t_ref] = filas_fk
                                     self.log_dummy(f"    ✅ {len(filas_fk)} registros maestros cargados de '{t_ref}'.")
                             except Exception as e:
-                                self.log_dummy(f" ⚠️ Aviso: No se pudo descargar el catálogo '{t_ref}': {e}")
+                                conn.rollback() # 🛡️ Limpia el error para que NO bloquee a las siguientes tablas
+                                self.log_dummy(f" ⚠️ Aviso: No se pudo descargar la tabla '{t_ref}': {e}")
 
                     reglas_custom[col_local] = regla
             # =========================================================
