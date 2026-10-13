@@ -719,6 +719,7 @@ class AplicacionCargas(ctk.CTk):
         return srv
 
 
+
     def conectar_db(self, srv, db_name=None):
         tipo = srv.get("tipo", "SQL Server")
         db_inicial = srv.get("db_default", "").strip()
@@ -728,26 +729,38 @@ class AplicacionCargas(ctk.CTk):
             db_destino = db_name if db_name else db_inicial
             db_part = f"DATABASE={db_destino};" if db_destino else ""
             conn_str = f"DRIVER={{{self.driver_sql}}};SERVER={srv['ip']};{db_part}UID={srv['user']};PWD={srv['pwd']};"
-            return pyodbc.connect(conn_str, autocommit=(db_name is None))
+            
+            conn = pyodbc.connect(conn_str, autocommit=(db_name is None))
+            
+            # --- SOLUCIÓN: FORZAR LECTURA DE CARACTERES ESPECIALES ---
+            try:
+                # cp1252 cubre la 'ñ', acentos y símbolos comerciales como '®'
+                conn.setdecoding(pyodbc.SQL_CHAR, encoding='cp1252')
+                conn.setdecoding(pyodbc.SQL_WCHAR, encoding='utf-8')
+                conn.setencoding(encoding='utf-8')
+            except Exception:
+                pass # Fallback silencioso por si la versión de pyodbc es antigua
+                
+            return conn
             
         elif tipo == "PostgreSQL":
             # Si no nos piden una DB, usamos la inicial. Si la inicial está vacía, usamos 'postgres' por seguridad
             db_destino = db_name if db_name else (db_inicial if db_inicial else 'postgres')
             
-            # --- LÓGICA INTELIGENTE DE CONEXIÓN SSL ---
+            # --- LÓGICA INTELIGENTE DE CONEXIÓN SSL Y CARACTERES ---
             try:
-                # Intento 1: Máxima seguridad (Como pgAdmin)
-                return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require')
+                # Intento 1: Máxima seguridad (Como pgAdmin) + Traducción forzada a UTF-8
+                return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require', client_encoding='utf8')
             except psycopg2.OperationalError as e:
                 # Si el servidor rechaza la conexión porque no tiene certificados SSL instalados
                 if "server does not support SSL" in str(e) or "no encryption" in str(e):
                     self.log(f"⚠️ Servidor sin SSL detectado. Cambiando a conexión estándar...")
-                    # Intento 2: Conexión estándar sin cifrar
-                    return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='disable')
+                    # Intento 2: Conexión estándar sin cifrar + Traducción forzada a UTF-8
+                    return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='disable', client_encoding='utf8')
                 else:
                     # Si es un error de contraseña incorrecta u otro fallo, lo mostramos normal
                     raise e
-    
+
     def al_seleccionar_servidor(self, display_name):
         if display_name in ["Seleccione un servidor...", "No hay servidores"]:
             self.cmb_dbs.set("Primero conecte al servidor")
@@ -1322,15 +1335,34 @@ class AplicacionCargas(ctk.CTk):
                 encabezados_csv = [str(h).strip().replace('\ufeff', '') for h in encabezados_csv]
 
                 mapeo_indices = []
+                hubo_coincidencia = False
+                
                 for col_sql in columnas_sql:
                     encontrado = False
                     for i, h in enumerate(encabezados_csv):
                         if h.lower() == col_sql.lower():
                             mapeo_indices.append(i)
                             encontrado = True
+                            hubo_coincidencia = True
                             break
                     if not encontrado:
-                        mapeo_indices.append(-1) # Si la columna SQL no existe en el CSV
+                        mapeo_indices.append(-1)
+
+                # --- NUEVO: FALLBACK POSICIONAL (CSV sin encabezados) ---
+                if not hubo_coincidencia:
+                    self.log("⚠️ No se detectaron encabezados en el CSV. Usando modo posicional (1 a 1)...")
+                    # Regresamos el cursor al inicio para no perder la primera fila de datos
+                    f.seek(0)
+                    reader = csv.reader(f, delimiter=delimitador)
+                    
+                    # Como no hay encabezados, mapeamos secuencialmente (0, 1, 2, 3...)
+                    mapeo_indices = []
+                    for idx in range(col_count):
+                        # Si el CSV tiene menos columnas que la BD, mandamos -1 para que la BD ponga NULL
+                        if idx < len(encabezados_csv):
+                            mapeo_indices.append(idx)
+                        else:
+                            mapeo_indices.append(-1)
                 # ----------------------------------------
 
                 batch_size = 50000
