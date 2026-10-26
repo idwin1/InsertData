@@ -906,21 +906,21 @@ class AplicacionCargas(ctk.CTk):
         self.log("Salida limpiada.")
 
     def _hilo_validar_tabla(self, srv, db_name, tabla):
-        # Esta función ahora solo valida si la tabla existe (como era originalmente)
         conn = None
         try:
             conn = self.conectar_db(srv, db_name)
             cursor = conn.cursor()
             esquema = "dbo" if srv["tipo"] == "SQL Server" else "public"
             
-            query = f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{esquema}' AND TABLE_NAME = '{tabla}'"
+            # Se remueve "TABLE_TYPE = 'BASE TABLE'" para aceptar vistas
+            query = f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{esquema}' AND TABLE_NAME = '{tabla}'"
             cursor.execute(query)
             existe = cursor.fetchone()[0] > 0
             
             if existe:
-                self.lbl_tabla_status.configure(text=f"✅ ¡La tabla '{tabla}' existe y está lista!", text_color="#00C851")
+                self.lbl_tabla_status.configure(text=f"✅ ¡El objeto '{tabla}' existe y está listo!", text_color="#00C851")
             else:
-                self.lbl_tabla_status.configure(text=f"❌ La tabla '{tabla}' NO fue encontrada", text_color="#ff4444")
+                self.lbl_tabla_status.configure(text=f"❌ La tabla/vista '{tabla}' NO fue encontrada", text_color="#ff4444")
                 
         except Exception as e:
             self.lbl_tabla_status.configure(text="❌ Error al consultar servidor", text_color="#ff4444")
@@ -953,79 +953,120 @@ class AplicacionCargas(ctk.CTk):
             cursor = conn.cursor()
             esquema = "dbo" if srv["tipo"] == "SQL Server" else "public"
             
-            self.log(f"\n--- 📊 ESTRUCTURA DE LA TABLA: {tabla.upper()} ---")
+            # 1. Detectar si es tabla o vista
+            cursor.execute(f"SELECT TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{esquema}' AND TABLE_NAME = '{tabla}'")
+            row_tipo = cursor.fetchone()
             
+            if not row_tipo:
+                self.log(f"❌ El objeto '{tabla}' no existe en la base de datos.")
+                return
+                
+            es_vista = (row_tipo[0] == 'VIEW')
+            tipo_txt = "VISTA" if es_vista else "TABLA"
+            
+            self.log(f"\n--- 📊 ESTRUCTURA DE LA {tipo_txt}: {tabla.upper()} ---")
+            
+            # 2. Obtener Columnas (Aplica para ambas)
             query_cols = f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{tabla}' AND TABLE_SCHEMA = '{esquema}' ORDER BY ORDINAL_POSITION"
             cursor.execute(query_cols)
             for col in cursor.fetchall():
                 nulo = "NULL" if col[2] == 'YES' else "NOT NULL"
                 self.log(f" 🔹 Columna: {col[0]} | Tipo: {col[1]} | {nulo}")
 
-            self.log(f"--- 🔑 LLAVES FORÁNEAS ---")
-            
-            if srv["tipo"] == "SQL Server":
-                query_fk = f"""
-                    SELECT c1.name AS Columna, t2.name AS Tabla_Ref, c2.name AS Columna_Ref
-                    FROM sys.foreign_keys fk
-                    INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-                    INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id
-                    INNER JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id
-                    INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id
-                    INNER JOIN sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id
-                    WHERE t1.name = '{tabla}'
-                """
-            else: 
-                query_fk = f"""
-                    SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name 
-                    FROM information_schema.table_constraints AS tc 
-                    JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-                    JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name
-                    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name='{tabla}'
-                """
-            
-            cursor.execute(query_fk)
-            fks = cursor.fetchall()
-            
-            if not fks:
-                self.log(" 🔸 No se encontraron llaves foráneas estrictas.")
+            # 3. Lógica específica para VISTAS
+            if es_vista:
+                self.log(f"--- 🔍 TABLAS ORIGEN (DEPENDENCIAS) ---")
+                try:
+                    # Consulta estándar ANSI compatible con SQL Server y Postgres
+                    cursor.execute(f"SELECT DISTINCT table_name FROM information_schema.view_table_usage WHERE view_name = '{tabla}' AND view_schema = '{esquema}'")
+                    tablas_origen = cursor.fetchall()
+                    if tablas_origen:
+                        for tbl in tablas_origen:
+                            self.log(f" 📦 Extrae datos de: {tbl[0]}")
+                    else:
+                        self.log(" 🔸 No se detectaron dependencias explícitas.")
+                except Exception as e:
+                    self.log(f" 🔸 Error leyendo dependencias: {e}")
+
+                self.log(f"--- 📜 SCRIPT DE CREACIÓN (CREATE VIEW) ---")
+                try:
+                    if srv["tipo"] == "SQL Server":
+                        cursor.execute(f"SELECT OBJECT_DEFINITION(OBJECT_ID('{esquema}.{tabla}'))")
+                    else:
+                        cursor.execute(f"SELECT pg_get_viewdef('{esquema}.{tabla}'::regclass, true)")
+                        
+                    script = cursor.fetchone()[0]
+                    if script:
+                        self.log(f"\n{script.strip()}\n")
+                    else:
+                        self.log(" 🔸 El motor no devolvió el script.")
+                except Exception as e:
+                    self.log(f" 🔸 Error obteniendo el script: {e}")
+                    
+            # 4. Lógica específica para TABLAS (Tu código original)
             else:
-                for fk in fks:
-                    self.log(f" 🔗 {fk[0]} ---> Depende de la tabla '{fk[1]}' (columna: {fk[2]})")
-
-            # --- NUEVO: DETECTAR ÍNDICES ---
-            self.log(f"--- ⚡ ÍNDICES ---")
-            if srv["tipo"] == "SQL Server":
-                query_idx = f"""
-                    SELECT i.name, i.type_desc 
-                    FROM sys.indexes i 
-                    INNER JOIN sys.tables t ON i.object_id = t.object_id 
-                    WHERE t.name = '{tabla}' AND i.type > 0
-                """
-                cursor.execute(query_idx)
-                indices = cursor.fetchall()
-                if not indices:
-                    self.log(" 🔸 No hay índices (Inserción ultrarrápida).")
+                self.log(f"--- 🔑 LLAVES FORÁNEAS ---")
+                if srv["tipo"] == "SQL Server":
+                    query_fk = f"""
+                        SELECT c1.name AS Columna, t2.name AS Tabla_Ref, c2.name AS Columna_Ref
+                        FROM sys.foreign_keys fk
+                        INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+                        INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id
+                        INNER JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id
+                        INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id
+                        INNER JOIN sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id
+                        WHERE t1.name = '{tabla}'
+                    """
+                else: 
+                    query_fk = f"""
+                        SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name 
+                        FROM information_schema.table_constraints AS tc 
+                        JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                        JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name
+                        WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name='{tabla}'
+                    """
+                
+                cursor.execute(query_fk)
+                fks = cursor.fetchall()
+                
+                if not fks:
+                    self.log(" 🔸 No se encontraron llaves foráneas estrictas.")
                 else:
-                    for idx in indices:
-                        self.log(f" 🗂️ {idx[0]} ({idx[1]})")
+                    for fk in fks:
+                        self.log(f" 🔗 {fk[0]} ---> Depende de la tabla '{fk[1]}' (columna: {fk[2]})")
 
-            # --- NUEVO: DETECTAR TRIGGERS ---
-            self.log(f"--- 🎯 TRIGGERS ---")
-            if srv["tipo"] == "SQL Server":
-                query_trg = f"""
-                    SELECT tr.name, tr.is_disabled 
-                    FROM sys.triggers tr 
-                    INNER JOIN sys.tables t ON tr.parent_id = t.object_id 
-                    WHERE t.name = '{tabla}'
-                """
-                cursor.execute(query_trg)
-                triggers = cursor.fetchall()
-                if not triggers:
-                    self.log(" 🔸 No hay triggers (No habrá cuellos de botella lógicos).")
-                else:
-                    for trg in triggers:
-                        estado = "Apagado" if trg[1] else "ACTIVO ⚠️"
-                        self.log(f" ⚙️ {trg[0]} | Estado: {estado}")
+                self.log(f"--- ⚡ ÍNDICES ---")
+                if srv["tipo"] == "SQL Server":
+                    query_idx = f"""
+                        SELECT i.name, i.type_desc 
+                        FROM sys.indexes i 
+                        INNER JOIN sys.tables t ON i.object_id = t.object_id 
+                        WHERE t.name = '{tabla}' AND i.type > 0
+                    """
+                    cursor.execute(query_idx)
+                    indices = cursor.fetchall()
+                    if not indices:
+                        self.log(" 🔸 No hay índices (Inserción ultrarrápida).")
+                    else:
+                        for idx in indices:
+                            self.log(f" 🗂️ {idx[0]} ({idx[1]})")
+
+                self.log(f"--- 🎯 TRIGGERS ---")
+                if srv["tipo"] == "SQL Server":
+                    query_trg = f"""
+                        SELECT tr.name, tr.is_disabled 
+                        FROM sys.triggers tr 
+                        INNER JOIN sys.tables t ON tr.parent_id = t.object_id 
+                        WHERE t.name = '{tabla}'
+                    """
+                    cursor.execute(query_trg)
+                    triggers = cursor.fetchall()
+                    if not triggers:
+                        self.log(" 🔸 No hay triggers (No habrá cuellos de botella lógicos).")
+                    else:
+                        for trg in triggers:
+                            estado = "Apagado" if trg[1] else "ACTIVO ⚠️"
+                            self.log(f" ⚙️ {trg[0]} | Estado: {estado}")
 
             self.log("-------------------------------------------\n")
                 
@@ -1033,8 +1074,7 @@ class AplicacionCargas(ctk.CTk):
             self.log(f"Error consultando estructura: {e}")
         finally:
             if conn: conn.close()
-            self.btn_estructura.configure(state="normal")
-
+            self.after(0, lambda: self.btn_estructura.configure(state="normal"))
 
     def seleccionar_archivo(self):
         ruta = filedialog.askopenfilename(title="Seleccionar archivo CSV", filetypes=[("Archivos CSV", "*.csv"), ("Todos", "*.*")])
@@ -1093,14 +1133,15 @@ class AplicacionCargas(ctk.CTk):
                 "pwd": ent_pwd.get(),
                 "db_default": ent_db_default.get().strip() # Guardamos la BD por defecto
             }
-            if all(nuevo.values()):
+            # Se evalúan solo los campos obligatorios, dejando db_default como opcional
+            if all([nuevo["tipo"], nuevo["nombre"], nuevo["ip"], nuevo["user"], nuevo["pwd"]]):
                 self.config_data["Servidores_BD"].append(nuevo)
                 guardar_configuracion(self.config_data)
                 self.actualizar_lista_servidores()
                 modal.destroy()
                 self.log(f"Servidor '{nuevo['nombre']}' registrado exitosamente.")
             else:
-                messagebox.showwarning("Incompleto", "Por favor llene todos los campos.")
+                messagebox.showwarning("Incompleto", "Por favor llene todos los campos obligatorios.")
 
         ctk.CTkButton(modal, text="Guardar", command=guardar).pack(pady=25)
 
