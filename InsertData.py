@@ -9,7 +9,7 @@ import requests
 from datetime import datetime
 from faker import Faker
 import random
-
+import webbrowser
 
 # ==========================================
 # 1. AUTO-INSTALADOR DE LIBRERÍAS
@@ -617,6 +617,10 @@ class AplicacionCargas(ctk.CTk):
         self.btn_cargar_plan = ctk.CTkButton(frame_top_global, text="📂 Cargar Plan", width=100, fg_color="#495057", hover_color="#343a40", command=self.cargar_escenario)
         self.btn_cargar_plan.pack(side="right", padx=5)
 
+        # --- NUEVO BOTÓN: MAPA VISUAL ---
+        self.btn_mapa_visual = ctk.CTkButton(frame_top_global, text="🗺️ Mapa Visual", width=110, fg_color="#e67e22", hover_color="#d35400", command=self.generar_mapa_visual)
+        self.btn_mapa_visual.pack(side="right", padx=5)
+
         # Contenedor Central: Lista de Tablas y Volúmenes
         ctk.CTkLabel(tab_global, text="Árbol de Ejecución y Volumetría:", font=("Arial", 14, "bold")).pack(anchor="w", padx=15, pady=(10, 0))
 
@@ -748,18 +752,17 @@ class AplicacionCargas(ctk.CTk):
             # Si no nos piden una DB, usamos la inicial. Si la inicial está vacía, usamos 'postgres' por seguridad
             db_destino = db_name if db_name else (db_inicial if db_inicial else 'postgres')
             
-            # --- LÓGICA INTELIGENTE DE CONEXIÓN SSL Y CARACTERES ---
+            # --- SOLUCIÓN APLICADA AQUÍ ---
+            # Cambiamos client_encoding='utf8' a 'latin1' para permitir que el 0xa0 y otros 
+            # caracteres rebeldes pasen hacia Python sin que el motor de Postgres aborte.
             try:
-                # Intento 1: Máxima seguridad (Como pgAdmin) + Traducción forzada a UTF-8
-                return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require', client_encoding='utf8')
+                return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='require', client_encoding='latin1')
             except psycopg2.OperationalError as e:
                 # Si el servidor rechaza la conexión porque no tiene certificados SSL instalados
                 if "server does not support SSL" in str(e) or "no encryption" in str(e):
                     self.log(f"⚠️ Servidor sin SSL detectado. Cambiando a conexión estándar...")
-                    # Intento 2: Conexión estándar sin cifrar + Traducción forzada a UTF-8
-                    return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='disable', client_encoding='utf8')
+                    return psycopg2.connect(host=srv['ip'], user=srv['user'], password=srv['pwd'], dbname=db_destino, sslmode='disable', client_encoding='latin1')
                 else:
-                    # Si es un error de contraseña incorrecta u otro fallo, lo mostramos normal
                     raise e
 
     def al_seleccionar_servidor(self, display_name):
@@ -912,19 +915,26 @@ class AplicacionCargas(ctk.CTk):
             cursor = conn.cursor()
             esquema = "dbo" if srv["tipo"] == "SQL Server" else "public"
             
-            # Se remueve "TABLE_TYPE = 'BASE TABLE'" para aceptar vistas
-            query = f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{esquema}' AND TABLE_NAME = '{tabla}'"
-            cursor.execute(query)
-            existe = cursor.fetchone()[0] > 0
+            # 1. Buscar en Tablas/Vistas
+            query_tv = f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{esquema}' AND TABLE_NAME = '{tabla}'"
+            cursor.execute(query_tv)
+            existe_tv = cursor.fetchone()[0] > 0
             
-            if existe:
-                self.lbl_tabla_status.configure(text=f"✅ ¡El objeto '{tabla}' existe y está listo!", text_color="#00C851")
+            # 2. Buscar en Procedimientos/Funciones
+            query_routines = f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = '{esquema}' AND ROUTINE_NAME = '{tabla}'"
+            cursor.execute(query_routines)
+            existe_rt = cursor.fetchone()[0] > 0
+            
+            if existe_tv:
+                self.lbl_tabla_status.configure(text=f"✅ ¡El objeto '{tabla}' (Tabla/Vista) existe!", text_color="#00C851")
+            elif existe_rt:
+                self.lbl_tabla_status.configure(text=f"✅ ¡El objeto '{tabla}' (Función/SP) existe!", text_color="#00C851")
             else:
-                self.lbl_tabla_status.configure(text=f"❌ La tabla/vista '{tabla}' NO fue encontrada", text_color="#ff4444")
+                self.lbl_tabla_status.configure(text=f"❌ El objeto '{tabla}' NO fue encontrado", text_color="#ff4444")
                 
         except Exception as e:
             self.lbl_tabla_status.configure(text="❌ Error al consultar servidor", text_color="#ff4444")
-            self.log(f"Error validando tabla: {e}")
+            self.log(f"Error validando objeto: {e}")
         finally:
             if conn: conn.close()
             self.btn_validar.configure(state="normal")
@@ -946,129 +956,255 @@ class AplicacionCargas(ctk.CTk):
         self.btn_estructura.configure(state="disabled")
         threading.Thread(target=self._hilo_estructura_tabla, args=(srv, db_name, tabla), daemon=True).start()
 
+    def preguntar_descargar_txt(self, nombre_obj, contenido_completo):
+        """Abre un modal para preguntar si desea guardar y luego lanza el guardado de archivo"""
+        confirmacion = DialogoModerno(
+            self, 
+            "Información Extensa Detectada", 
+            f"El código fuente de '{nombre_obj}' es muy grande para mostrarlo completo en pantalla.\n\n¿Deseas descargar el análisis de dependencias y el script completo en un archivo de texto (.txt)?", 
+            tipo="pregunta", 
+            con_cancelar=True
+        ).obtener_resultado()
+
+        if confirmacion:
+            ruta = filedialog.asksaveasfilename(
+                title=f"Guardar estructura de {nombre_obj}",
+                initialfile=f"Estructura_{nombre_obj}.txt",
+                defaultextension=".txt",
+                filetypes=[("Archivos de texto", "*.txt"), ("Todos", "*.*")]
+            )
+            if ruta:
+                try:
+                    with open(ruta, "w", encoding="utf-8") as f:
+                        f.write(contenido_completo)
+                    self.log(f"💾 ¡Archivo guardado exitosamente en:\n{ruta}")
+                except Exception as e:
+                    self.log(f"❌ Error al guardar el archivo: {e}")
+
     def _hilo_estructura_tabla(self, srv, db_name, tabla):
         conn = None
+        # --- NUEVO: Acumulador para el archivo TXT ---
+        reporte_txt = []
+        
+        def log_y_guardar(mensaje):
+            self.log(mensaje)
+            reporte_txt.append(mensaje)
+
         try:
             conn = self.conectar_db(srv, db_name)
             cursor = conn.cursor()
             esquema = "dbo" if srv["tipo"] == "SQL Server" else "public"
             
-            # 1. Detectar si es tabla o vista
+            # 1. Determinar el tipo de objeto
             cursor.execute(f"SELECT TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{esquema}' AND TABLE_NAME = '{tabla}'")
             row_tipo = cursor.fetchone()
             
-            if not row_tipo:
-                self.log(f"❌ El objeto '{tabla}' no existe en la base de datos.")
-                return
-                
-            es_vista = (row_tipo[0] == 'VIEW')
-            tipo_txt = "VISTA" if es_vista else "TABLA"
+            es_rutina = False
+            tipo_obj = ""
             
-            self.log(f"\n--- 📊 ESTRUCTURA DE LA {tipo_txt}: {tabla.upper()} ---")
-            
-            # 2. Obtener Columnas (Aplica para ambas)
-            query_cols = f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{tabla}' AND TABLE_SCHEMA = '{esquema}' ORDER BY ORDINAL_POSITION"
-            cursor.execute(query_cols)
-            for col in cursor.fetchall():
-                nulo = "NULL" if col[2] == 'YES' else "NOT NULL"
-                self.log(f" 🔹 Columna: {col[0]} | Tipo: {col[1]} | {nulo}")
+            if row_tipo:
+                es_vista = (row_tipo[0] == 'VIEW')
+                tipo_obj = "VISTA" if es_vista else "TABLA"
+            else:
+                # Si no es tabla/vista, buscar si es rutina (Stored Procedure o Función)
+                cursor.execute(f"SELECT ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = '{esquema}' AND ROUTINE_NAME = '{tabla}'")
+                row_rutina = cursor.fetchone()
+                if row_rutina:
+                    es_rutina = True
+                    tipo_obj = row_rutina[0] # Dirá 'PROCEDURE' o 'FUNCTION'
+                else:
+                    self.log(f"❌ El objeto '{tabla}' no existe como Tabla, Vista, SP o Función.")
+                    return
 
-            # 3. Lógica específica para VISTAS
-            if es_vista:
-                self.log(f"--- 🔍 TABLAS ORIGEN (DEPENDENCIAS) ---")
+            log_y_guardar(f"\n--- 📊 ESTRUCTURA DE: {tabla.upper()} ({tipo_obj}) ---")
+
+            # ==========================================
+            # RAMA A: LÓGICA PARA FUNCIONES Y SPs
+            # ==========================================
+            if es_rutina:
+                log_y_guardar(f"--- 📥 PARÁMETROS ---")
                 try:
-                    # Consulta estándar ANSI compatible con SQL Server y Postgres
-                    cursor.execute(f"SELECT DISTINCT table_name FROM information_schema.view_table_usage WHERE view_name = '{tabla}' AND view_schema = '{esquema}'")
-                    tablas_origen = cursor.fetchall()
-                    if tablas_origen:
-                        for tbl in tablas_origen:
-                            self.log(f" 📦 Extrae datos de: {tbl[0]}")
+                    query_params = f"SELECT PARAMETER_NAME, DATA_TYPE, PARAMETER_MODE FROM INFORMATION_SCHEMA.PARAMETERS WHERE SPECIFIC_SCHEMA = '{esquema}' AND SPECIFIC_NAME = '{tabla}' ORDER BY ORDINAL_POSITION"
+                    cursor.execute(query_params)
+                    params = cursor.fetchall()
+                    if params:
+                        for p in params:
+                            p_name = p[0] if p[0] else "RETURN_VALUE"
+                            log_y_guardar(f" 🔹 {p_name} | Tipo: {p[1]} | Modo: {p[2]}")
                     else:
-                        self.log(" 🔸 No se detectaron dependencias explícitas.")
+                        log_y_guardar(" 🔸 No requiere parámetros de entrada.")
                 except Exception as e:
-                    self.log(f" 🔸 Error leyendo dependencias: {e}")
+                    log_y_guardar(f" 🔸 Error leyendo parámetros: {e}")
 
-                self.log(f"--- 📜 SCRIPT DE CREACIÓN (CREATE VIEW) ---")
+                log_y_guardar(f"--- 📜 SCRIPT DEL CÓDIGO (CREATE {tipo_obj}) ---")
+                script_text = ""
                 try:
                     if srv["tipo"] == "SQL Server":
-                        cursor.execute(f"SELECT OBJECT_DEFINITION(OBJECT_ID('{esquema}.{tabla}'))")
+                        cursor.execute(f"SELECT CAST(OBJECT_DEFINITION(OBJECT_ID('{esquema}.{tabla}')) AS VARBINARY(MAX))")
+                        raw_bytes = cursor.fetchone()[0]
+                        script_text = raw_bytes.decode('utf-16le', errors='replace') if raw_bytes else None
                     else:
-                        cursor.execute(f"SELECT pg_get_viewdef('{esquema}.{tabla}'::regclass, true)")
+                        cursor.execute(f"SELECT pg_get_functiondef('{esquema}.{tabla}'::regproc)")
+                        script_text = cursor.fetchone()[0]
                         
-                    script = cursor.fetchone()[0]
-                    if script:
-                        self.log(f"\n{script.strip()}\n")
+                    if script_text:
+                        reporte_txt.append(f"\n{script_text.strip()}\n")
+                        if len(script_text) > 4000:
+                            self.log(f"\n{script_text.strip()[:800]}...\n\n(⚠️ Script truncado en consola para ahorrar memoria gráfica)\n")
+                        else:
+                            self.log(f"\n{script_text.strip()}\n")
                     else:
-                        self.log(" 🔸 El motor no devolvió el script.")
+                        log_y_guardar(" 🔸 El motor no devolvió el script.")
                 except Exception as e:
-                    self.log(f" 🔸 Error obteniendo el script: {e}")
-                    
-            # 4. Lógica específica para TABLAS (Tu código original)
+                    log_y_guardar(f" 🔸 Error obteniendo el script: {e}")
+
+                # === NUEVO: ANÁLISIS DE DEPENDENCIAS Y RELACIONES INTERNAS ===
+                log_y_guardar(f"--- 🌳 DEPENDENCIAS DEL CÓDIGO ---")
+                tablas_involucradas = []
+                
+                try:
+                    if srv["tipo"] == "SQL Server":
+                        # 1. Extraer tablas y SPs usados (SQL Server nativo)
+                        query_deps = f"""
+                            SELECT referenced_entity_name, referenced_class_desc 
+                            FROM sys.sql_expression_dependencies 
+                            WHERE referencing_id = OBJECT_ID('{esquema}.{tabla}')
+                        """
+                        cursor.execute(query_deps)
+                        deps = cursor.fetchall()
+                        if deps:
+                            for d in deps:
+                                nombre_obj = d[0]
+                                tipo_desc = d[1]
+                                if tipo_desc == "OBJECT_OR_COLUMN":
+                                    tablas_involucradas.append(nombre_obj)
+                                    log_y_guardar(f" 📦 Usa la Tabla/Vista: {nombre_obj}")
+                                else:
+                                    log_y_guardar(f" ⚙️ Invoca al SP/Función: {nombre_obj}")
+                        else:
+                            log_y_guardar(" 🔸 No se detectaron dependencias explícitas.")
+                            
+                    else:
+                        # 1. Extraer tablas y SPs usados (PostgreSQL mediante escaneo de texto)
+                        if script_text:
+                            import re
+                            # Buscar otras rutinas
+                            cursor.execute(f"SELECT routine_name FROM information_schema.routines WHERE routine_schema = '{esquema}' AND routine_name != '{tabla}'")
+                            for r_name in cursor.fetchall():
+                                if re.search(r'\b' + re.escape(r_name[0]) + r'\b', script_text, re.IGNORECASE):
+                                    log_y_guardar(f" ⚙️ Invoca a la Función/SP local: {r_name[0]}")
+                            
+                            # Buscar tablas en el texto
+                            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{esquema}'")
+                            for t_name in cursor.fetchall():
+                                if re.search(r'\b' + re.escape(t_name[0]) + r'\b', script_text, re.IGNORECASE):
+                                    tablas_involucradas.append(t_name[0])
+                                    log_y_guardar(f" 📦 Usa la Tabla/Vista: {t_name[0]}")
+                        else:
+                            log_y_guardar(" 🔸 Imposible escanear dependencias sin el script de origen.")
+
+                    # 2. Mapear las relaciones reales entre las tablas detectadas
+                    if len(tablas_involucradas) > 1:
+                        log_y_guardar(f"--- 🔗 RELACIONES INTERNAS (Entre las tablas usadas) ---")
+                        tablas_unicas = list(set(tablas_involucradas))
+                        tablas_str = ",".join([f"'{t}'" for t in tablas_unicas])
+                        
+                        if srv["tipo"] == "SQL Server":
+                            query_fk = f"""
+                                SELECT t1.name, t2.name, c1.name
+                                FROM sys.foreign_keys fk 
+                                INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id 
+                                INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id 
+                                INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id
+                                INNER JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id
+                                WHERE t1.name IN ({tablas_str}) AND t2.name IN ({tablas_str})
+                            """
+                        else:
+                            query_fk = f"""
+                                SELECT tc.table_name, ccu.table_name, kcu.column_name 
+                                FROM information_schema.table_constraints tc 
+                                JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name 
+                                JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name 
+                                WHERE tc.constraint_type = 'FOREIGN KEY' 
+                                AND tc.table_name IN ({tablas_str}) AND ccu.table_name IN ({tablas_str})
+                            """
+                            
+                        cursor.execute(query_fk)
+                        fks = cursor.fetchall()
+                        if fks:
+                            for fk in fks:
+                                log_y_guardar(f" 🤝 '{fk[0]}' se conecta con '{fk[1]}' (vía {fk[2]})")
+                        else:
+                            log_y_guardar(" 🔸 Las tablas no tienen llaves foráneas formales entre sí.")
+
+                except Exception as e:
+                    log_y_guardar(f" 🔸 Error rastreando dependencias: {e}")
+                # --- DISPARADOR DE DESCARGA PARA FUNCIONES GRANDES ---
+                if script_text and len(script_text) > 3000:
+                    texto_final = "\n".join(reporte_txt)
+                    # Mandamos a llamar al modal en el hilo principal de Tkinter (0)
+                    self.after(0, lambda: self.preguntar_descargar_txt(tabla, texto_final))
+            # ==========================================
+            # RAMA B: LÓGICA PARA TABLAS Y VISTAS
+            # ==========================================
             else:
-                self.log(f"--- 🔑 LLAVES FORÁNEAS ---")
-                if srv["tipo"] == "SQL Server":
-                    query_fk = f"""
-                        SELECT c1.name AS Columna, t2.name AS Tabla_Ref, c2.name AS Columna_Ref
-                        FROM sys.foreign_keys fk
-                        INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-                        INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id
-                        INNER JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id
-                        INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id
-                        INNER JOIN sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id
-                        WHERE t1.name = '{tabla}'
-                    """
-                else: 
-                    query_fk = f"""
-                        SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name 
-                        FROM information_schema.table_constraints AS tc 
-                        JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-                        JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name
-                        WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name='{tabla}'
-                    """
-                
-                cursor.execute(query_fk)
-                fks = cursor.fetchall()
-                
-                if not fks:
-                    self.log(" 🔸 No se encontraron llaves foráneas estrictas.")
-                else:
-                    for fk in fks:
-                        self.log(f" 🔗 {fk[0]} ---> Depende de la tabla '{fk[1]}' (columna: {fk[2]})")
+                query_cols = f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{tabla}' AND TABLE_SCHEMA = '{esquema}' ORDER BY ORDINAL_POSITION"
+                cursor.execute(query_cols)
+                for col in cursor.fetchall():
+                    nulo = "NULL" if col[2] == 'YES' else "NOT NULL"
+                    log_y_guardar(f" 🔹 Columna: {col[0]} | Tipo: {col[1]} | {nulo}")
 
-                self.log(f"--- ⚡ ÍNDICES ---")
-                if srv["tipo"] == "SQL Server":
-                    query_idx = f"""
-                        SELECT i.name, i.type_desc 
-                        FROM sys.indexes i 
-                        INNER JOIN sys.tables t ON i.object_id = t.object_id 
-                        WHERE t.name = '{tabla}' AND i.type > 0
-                    """
-                    cursor.execute(query_idx)
-                    indices = cursor.fetchall()
-                    if not indices:
-                        self.log(" 🔸 No hay índices (Inserción ultrarrápida).")
+                if tipo_obj == "VISTA":
+                    log_y_guardar(f"--- 🔍 TABLAS ORIGEN (DEPENDENCIAS) ---")
+                    try:
+                        cursor.execute(f"SELECT DISTINCT table_name FROM information_schema.view_table_usage WHERE view_name = '{tabla}' AND view_schema = '{esquema}'")
+                        tablas_origen = cursor.fetchall()
+                        if tablas_origen:
+                            for tbl in tablas_origen:
+                                log_y_guardar(f" 📦 Extrae datos de: {tbl[0]}")
+                        else:
+                            log_y_guardar(" 🔸 No se detectaron dependencias explícitas.")
+                    except Exception as e:
+                        pass
+
+                    log_y_guardar(f"--- 📜 SCRIPT DE CREACIÓN (CREATE VIEW) ---")
+                    try:
+                        if srv["tipo"] == "SQL Server":
+                            # Extraemos los bytes crudos (VARBINARY) para saltarnos el error de pyodbc
+                            cursor.execute(f"SELECT CAST(OBJECT_DEFINITION(OBJECT_ID('{esquema}.{tabla}')) AS VARBINARY(MAX))")
+                            raw_bytes = cursor.fetchone()[0]
+                            script = raw_bytes.decode('utf-16le', errors='replace') if raw_bytes else None
+                        else:
+                            cursor.execute(f"SELECT pg_get_viewdef('{esquema}.{tabla}'::regclass, true)")
+                            script = cursor.fetchone()[0]
+                            
+                        if script:
+                            log_y_guardar(f"\n{script.strip()}\n")
+                        else:
+                            log_y_guardar(" 🔸 El motor no devolvió el script.")
+                    except Exception as e:
+                        log_y_guardar(f" 🔸 Error obteniendo el script: {e}")
+                        
+                else: # Es TABLA normal
+                    log_y_guardar(f"--- 🔑 LLAVES FORÁNEAS ---")
+                    if srv["tipo"] == "SQL Server":
+                        query_fk = f"SELECT c1.name AS Columna, t2.name AS Tabla_Ref, c2.name AS Columna_Ref FROM sys.foreign_keys fk INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id INNER JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id INNER JOIN sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id WHERE t1.name = '{tabla}'"
+                    else: 
+                        query_fk = f"SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name FROM information_schema.table_constraints AS tc JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name='{tabla}'"
+                    
+                    cursor.execute(query_fk)
+                    fks = cursor.fetchall()
+                    if fks:
+                        for fk in fks: log_y_guardar(f" 🔗 {fk[0]} ---> Depende de '{fk[1]}' (col: {fk[2]})")
                     else:
-                        for idx in indices:
-                            self.log(f" 🗂️ {idx[0]} ({idx[1]})")
+                        log_y_guardar(" 🔸 No se encontraron llaves foráneas.")
 
-                self.log(f"--- 🎯 TRIGGERS ---")
-                if srv["tipo"] == "SQL Server":
-                    query_trg = f"""
-                        SELECT tr.name, tr.is_disabled 
-                        FROM sys.triggers tr 
-                        INNER JOIN sys.tables t ON tr.parent_id = t.object_id 
-                        WHERE t.name = '{tabla}'
-                    """
-                    cursor.execute(query_trg)
-                    triggers = cursor.fetchall()
-                    if not triggers:
-                        self.log(" 🔸 No hay triggers (No habrá cuellos de botella lógicos).")
-                    else:
-                        for trg in triggers:
-                            estado = "Apagado" if trg[1] else "ACTIVO ⚠️"
-                            self.log(f" ⚙️ {trg[0]} | Estado: {estado}")
+                    log_y_guardar(f"--- ⚡ ÍNDICES ---")
+                    if srv["tipo"] == "SQL Server":
+                        cursor.execute(f"SELECT i.name, i.type_desc FROM sys.indexes i INNER JOIN sys.tables t ON i.object_id = t.object_id WHERE t.name = '{tabla}' AND i.type > 0")
+                        for idx in cursor.fetchall(): log_y_guardar(f" 🗂️ {idx[0]} ({idx[1]})")
 
-            self.log("-------------------------------------------\n")
+            log_y_guardar("-------------------------------------------\n")
                 
         except Exception as e:
             self.log(f"Error consultando estructura: {e}")
@@ -2153,7 +2289,13 @@ class AplicacionCargas(ctk.CTk):
                             self.log_dummy(f" ⚠️ Aviso: No se pudo descargar la tabla '{t_ref}': {e}")
 
             self.log_dummy(f"🎲 Escribiendo {cantidad} registros dummy...")
-            nombre_archivo = f"dummy_{tabla}_{datetime.now().strftime('%H%M%S')}.csv"
+            
+            # --- NUEVO: Crear carpeta 'csv' si no existe y armar la ruta ---
+            if not os.path.exists("csv"):
+                os.makedirs("csv")
+                
+            nombre_archivo = os.path.join("csv", f"dummy_{tabla}_{datetime.now().strftime('%H%M%S')}.csv")
+            # ---------------------------------------------------------------
             
             with open(nombre_archivo, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.writer(f, delimiter=',')
@@ -2393,7 +2535,7 @@ class AplicacionCargas(ctk.CTk):
             # Solo actualizamos la UI si NO es el orquestador global
             if not silencioso:
                 def actualizar_ui_dummy():
-                    self.lbl_archivo.configure(text=nombre_archivo)
+                    self.lbl_archivo.configure(text=os.path.basename(nombre_archivo))
                     self.cmb_servidores.set(srv_name)
                     self.cmb_dbs.configure(values=self.cmb_dbs_dummy.cget("values"))
                     self.cmb_dbs.set(db_name)
@@ -3601,8 +3743,416 @@ class AplicacionCargas(ctk.CTk):
         frame_footer.pack(fill="x", padx=20, pady=15)
         ctk.CTkButton(frame_footer, text="❌ Cancelar", fg_color="#dc3545", hover_color="#c82333", command=modal.destroy).pack(side="left", padx=5)
         ctk.CTkButton(frame_footer, text="💾 Aplicar Fusión", font=("Arial", 13, "bold"), fg_color="#28a745", hover_color="#218838", command=aplicar_fusion).pack(side="right", padx=5)
+    
 
-   
+    def _obtener_todas_las_bds(self, srv):
+        dbs = []
+        conn = None
+        try:
+            conn = self.conectar_db(srv)
+            cursor = conn.cursor()
+            if srv["tipo"] == "SQL Server":
+                # Excluir bases del sistema por defecto (master, tempdb, model, msdb)
+                cursor.execute("SELECT name FROM sys.databases WHERE state = 0 AND database_id > 4")
+            else:
+                cursor.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
+            dbs = [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            self.log_global(f"⚠️ No se pudieron listar las BDs del servidor {srv.get('nombre')}: {e}")
+        finally:
+            if conn: conn.close()
+        return dbs
+
+    def generar_mapa_visual(self):
+        srv_name = self.cmb_servidores_global.get()
+        db_name = self.cmb_dbs_global.get()
+
+        if srv_name in ["Seleccione un servidor...", "No hay servidores"]:
+            DialogoModerno(self, "Falta Conexión", "Selecciona al menos un servidor para generar mapas.", tipo="warning").obtener_resultado()
+            return
+
+        # --- MODAL DE SELECCIÓN DE ALCANCE ---
+        modal = ctk.CTkToplevel(self)
+        modal.title("Alcance del Diagrama")
+        modal.geometry("400x320")
+        modal.grab_set()
+        modal.transient(self)
+
+        ctk.CTkLabel(modal, text="Selecciona la profundidad del análisis:", font=("Arial", 14, "bold")).pack(pady=(15, 5))
+
+        # --- NUEVO: Checkbox para forzar recálculo en vivo ---
+        chk_forzar_var = ctk.BooleanVar(value=False)
+        chk_forzar = ctk.CTkCheckBox(modal, text="🔄 Forzar escaneo en vivo de la BD (Actualiza caché)", 
+                                     variable=chk_forzar_var, fg_color="#17a2b8")
+        chk_forzar.pack(pady=(0, 15))
+        # -----------------------------------------------------
+
+        def lanzar(alcance):
+            forzar = chk_forzar_var.get()
+            modal.destroy()
+            self.btn_mapa_visual.configure(state="disabled", text="⏳ Generando...")
+            import threading
+            threading.Thread(target=self._hilo_generar_mapa_avanzado, args=(alcance, srv_name, db_name, forzar), daemon=True).start()
+
+        ctk.CTkButton(modal, text="📊 Nivel BD (Solo la base actual)", height=35, fg_color="#17a2b8", hover_color="#138496", 
+                      command=lambda: lanzar("BD")).pack(pady=8, fill="x", padx=25)
+        
+        ctk.CTkButton(modal, text="🏢 Nivel Servidor (Todas las BDs locales)", height=35, fg_color="#f39c12", hover_color="#e67e22", 
+                      command=lambda: lanzar("SERVIDOR")).pack(pady=8, fill="x", padx=25)
+        
+        ctk.CTkButton(modal, text="🌐 Nivel Global (Multi-Servidor Híbrido)", height=35, fg_color="#6f42c1", hover_color="#59339d", 
+                      command=lambda: lanzar("GLOBAL")).pack(pady=8, fill="x", padx=25)
+
+    def _hilo_generar_mapa_avanzado(self, alcance, srv_actual, db_actual, forzar_recalculo):
+        import re
+        memoria = cargar_relaciones()
+        
+        nodos_dict = {} 
+        aristas_js = []
+        aristas_set = set() # Para evitar dibujar flechas duplicadas
+
+        # =====================================================================
+        # PASO A: LÓGICA DE ESCANEO EN VIVO (Si el usuario marcó el Checkbox)
+        # =====================================================================
+        if forzar_recalculo:
+            self.log_global(f"🔄 Modo En Vivo: Extrayendo estructura real de la BD para alcance {alcance}...")
+            target_dbs = []
+            
+            if alcance == "BD" and "Primero conecte" not in db_actual:
+                target_dbs.append((srv_actual, db_actual))
+            elif alcance == "SERVIDOR":
+                srv_cred = self.obtener_credenciales(srv_actual)
+                if srv_cred:
+                    for d in self._obtener_todas_las_bds(srv_cred): target_dbs.append((srv_actual, d))
+            elif alcance == "GLOBAL":
+                for srv_cred in self.config_data.get("Servidores_BD", []):
+                    s_name = f"{srv_cred.get('nombre')} - {srv_cred.get('ip')} ({srv_cred.get('tipo')})"
+                    for d in self._obtener_todas_las_bds(srv_cred): target_dbs.append((s_name, d))
+
+            target_dbs = list(set(target_dbs))
+
+            for s_name, d_name in target_dbs:
+                srv_cred = self.obtener_credenciales(s_name)
+                if not srv_cred: continue
+                conn = None
+                try:
+                    conn = self.conectar_db(srv_cred, d_name)
+                    cursor = conn.cursor()
+                    esquema = "dbo" if srv_cred["tipo"] == "SQL Server" else "public"
+
+                    # Leer Tablas
+                    if srv_cred["tipo"] == "SQL Server":
+                        cursor.execute(f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{esquema}'")
+                    else:
+                        cursor.execute(f"SELECT tablename FROM pg_tables WHERE schemaname = '{esquema}'")
+                    
+                    todas_tablas = [row[0].lower() for row in cursor.fetchall()]
+                    
+                    # Actualizar caché de dependencias puras para el Orquestador
+                    dependencias_orquestador = {t: [] for t in todas_tablas}
+
+                    for t_name in todas_tablas:
+                        id_nodo = f"{s_name.lower()}|{d_name.lower()}|{t_name}"
+                        nodos_dict[id_nodo] = {"tabla": t_name.upper(), "srv": s_name, "db": d_name, "columnas": set(), "color": "#e67e22"}
+
+                    # Leer Llaves Foráneas y relacionarlas con columnas exactas
+                    if srv_cred["tipo"] == "SQL Server":
+                        query_fk = """SELECT t1.name, c1.name, t2.name, c2.name FROM sys.foreign_keys fk INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.tables t1 ON fkc.parent_object_id = t1.object_id INNER JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id INNER JOIN sys.tables t2 ON fkc.referenced_object_id = t2.object_id INNER JOIN sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id"""
+                    else:
+                        query_fk = """SELECT tc.table_name, kcu.column_name, ccu.table_name, ccu.column_name FROM information_schema.table_constraints AS tc JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY'"""
+                    
+                    cursor.execute(query_fk)
+                    for t_o, c_o, t_d, c_d in cursor.fetchall():
+                        t_orig_lower, t_dest_lower = t_o.lower(), t_d.lower()
+                        id_orig = f"{s_name.lower()}|{d_name.lower()}|{t_orig_lower}"
+                        id_dest = f"{s_name.lower()}|{d_name.lower()}|{t_dest_lower}"
+                        
+                        if t_orig_lower != t_dest_lower: dependencias_orquestador[t_orig_lower].append(t_dest_lower)
+                        
+                        if id_orig in nodos_dict: nodos_dict[id_orig]["columnas"].add(f"🔑 {c_o} (FK)")
+                        if id_dest in nodos_dict: nodos_dict[id_dest]["columnas"].add(f"🎯 {c_d} (PK)")
+                        
+                        str_arista = f"{{ from: '{id_orig}', to: '{id_dest}', label: '{c_o}', font: {{align: 'middle', size: 10, color: '#94a3b8'}}, arrows: 'to', color: {{ color: '#38bdf8', highlight: '#0ea5e9' }} }}"
+                        if str_arista not in aristas_set:
+                            aristas_js.append(str_arista)
+                            aristas_set.add(str_arista)
+                            
+                    # Auto-Guardar caché para no tener que volver a escanear en el orquestador
+                    clave_m = f"{s_name}|{d_name}"
+                    if clave_m not in memoria: memoria[clave_m] = {"_configuracion_global": {}, "tablas": {}}
+                    if "_configuracion_global" not in memoria[clave_m]: memoria[clave_m]["_configuracion_global"] = {}
+                    memoria[clave_m]["_configuracion_global"]["arbol_dependencias"] = dependencias_orquestador
+                    
+                except Exception as e:
+                    pass 
+                finally:
+                    if conn: conn.close()
+            guardar_relaciones(memoria)
+
+        # =====================================================================
+        # PASO B: LÓGICA DE CACHÉ (Si NO marcó el check, o complemento híbrido)
+        # =====================================================================
+        else:
+            self.log_global(f"⚡ Modo Ultrarrápido: Leyendo caché de memoria para alcance {alcance}...")
+            for clave_memoria, contenido in memoria.items():
+                if "|" not in clave_memoria: continue
+                srv_ext, db_ext = clave_memoria.split("|", 1)
+
+                if alcance == "BD" and (srv_ext != srv_actual or db_ext != db_actual): continue
+                if alcance == "SERVIDOR" and srv_ext != srv_actual: continue
+
+                conf_global = contenido.get("_configuracion_global", {})
+                arbol_dependencias = conf_global.get("arbol_dependencias", {})
+                tablas_locales = contenido.get("tablas", {})
+                
+                todas_tablas = set(arbol_dependencias.keys()).union(set(tablas_locales.keys()))
+
+                for t_name in todas_tablas:
+                    id_nodo = f"{srv_ext.lower()}|{db_ext.lower()}|{t_name.lower()}"
+                    if id_nodo not in nodos_dict:
+                        nodos_dict[id_nodo] = {"tabla": t_name.upper(), "srv": srv_ext, "db": db_ext, "columnas": set(), "color": "#e67e22"}
+
+                    if t_name in arbol_dependencias:
+                        for t_dep in arbol_dependencias[t_name]:
+                            id_dest = f"{srv_ext.lower()}|{db_ext.lower()}|{t_dep.lower()}"
+                            if id_dest not in nodos_dict:
+                                nodos_dict[id_dest] = {"tabla": t_dep.upper(), "srv": srv_ext, "db": db_ext, "columnas": set(), "color": "#e67e22"}
+                            
+                            nodos_dict[id_nodo]["columnas"].add(f"🔑 FK hacia {t_dep.upper()}")
+                            nodos_dict[id_dest]["columnas"].add(f"🎯 Referenciada por {t_name.upper()}")
+                            
+                            str_arista = f"{{ from: '{id_nodo}', to: '{id_dest}', label: 'Nativa', font: {{align: 'middle', size: 10, color: '#64748b'}}, arrows: 'to', color: {{ color: '#38bdf8', highlight: '#0ea5e9' }} }}"
+                            if str_arista not in aristas_set:
+                                aristas_js.append(str_arista)
+                                aristas_set.add(str_arista)
+
+        # ==========================================
+        # INYECCIÓN DE TODAS LAS REGLAS MANUALES (Locales y Globales)
+        # ==========================================
+        import re
+        for clave_memoria, contenido in memoria.items():
+            if "|" not in clave_memoria: continue
+            srv_ext, db_ext = clave_memoria.split("|", 1)
+            
+            if alcance == "BD" and (srv_ext != srv_actual or db_ext != db_actual): continue
+            if alcance == "SERVIDOR" and srv_ext != srv_actual: continue
+            
+            tablas_locales = contenido.get("tablas", {})
+            for t_name, reglas_str in tablas_locales.items():
+                id_nodo = f"{srv_ext.lower()}|{db_ext.lower()}|{t_name.lower()}"
+                
+                # Garantizar que la tabla origen exista en el mapa
+                if id_nodo not in nodos_dict:
+                    nodos_dict[id_nodo] = {"tabla": t_name.upper(), "srv": srv_ext, "db": db_ext, "columnas": set(), "color": "#e67e22"}
+
+                lineas = reglas_str.split('\n')
+                for linea in lineas:
+                    if ':' not in linea: continue
+                    partes = linea.split(':', 1)
+                    c_local = partes[0].strip()
+                    regla = partes[1].strip()
+                    
+                    deps_encontradas = []
+
+                    # 1. Reglas Globales (Cross-Server) -> [Srv].[DB].[Tabla].columna
+                    matches_ext = re.findall(r'\[([^\]]+)\]\.\[([^\]]+)\]\.\[([^\]]+)\]\.([^\s\n<]+)', regla)
+                    for s_ref, d_ref, t_ref, c_ref in matches_ext:
+                        deps_encontradas.append({"srv": s_ref, "db": d_ref, "tab": t_ref, "col": c_ref, "tipo": "Híbrida"})
+
+                    # 2. Inyecciones Sincronizadas -> <<tabla.columna>>
+                    for t_ref, c_ref in re.findall(r'<<([^>]+)\.([^>]+)>>', regla):
+                        deps_encontradas.append({"srv": srv_ext, "db": db_ext, "tab": t_ref, "col": c_ref, "tipo": "Inyección"})
+
+                    # 3. Reglas Condicionales (WHERE) -> tabla.columna WHERE ...
+                    if " WHERE " in regla.upper():
+                        p_select = re.split(r'\s+WHERE\s+', regla, flags=re.IGNORECASE)[0]
+                        if '.' in p_select and '[' not in p_select:
+                            ps = p_select.split('.')
+                            if len(ps) == 2:
+                                deps_encontradas.append({"srv": srv_ext, "db": db_ext, "tab": ps[0].strip(), "col": ps[1].strip(), "tipo": "Condicional"})
+
+                    # 4. Relación Directa Local -> tabla.columna
+                    if '.' in regla and ',' not in regla and '#' not in regla and '?' not in regla and '[' not in regla and '<<' not in regla and ' ' not in regla:
+                        ps = regla.split('.')
+                        if len(ps) == 2:
+                            deps_encontradas.append({"srv": srv_ext, "db": db_ext, "tab": ps[0].strip(), "col": ps[1].strip(), "tipo": "Directa"})
+
+                    # Procesar conexiones encontradas
+                    for dep in deps_encontradas:
+                        s_d, d_d, t_d, c_d = dep["srv"], dep["db"], dep["tab"], dep["col"]
+                        id_dest = f"{s_d.lower()}|{d_d.lower()}|{t_d.lower()}"
+                        
+                        if id_dest not in nodos_dict:
+                            color_fantasma = "#dc3545" if s_d.lower() != srv_ext.lower() or d_d.lower() != db_ext.lower() else "#e67e22"
+                            nodos_dict[id_dest] = {"tabla": t_d.upper(), "srv": s_d, "db": d_d, "columnas": set(), "color": color_fantasma}
+                        
+                        es_hibrida = (s_d.lower() != srv_ext.lower() or d_d.lower() != db_ext.lower())
+                        if es_hibrida: nodos_dict[id_nodo]["color"] = "#6f42c1"
+                            
+                        # Inyectar nombres de columnas super detallados en las cajas
+                        nodos_dict[id_nodo]["columnas"].add(f"📝 {c_local} (Regla {dep['tipo']})")
+                        nodos_dict[id_dest]["columnas"].add(f"🎯 {c_d} (Solicitado)")
+                        
+                        color_arista = "#d946ef" if es_hibrida else "#10b981" # Morado híbrido, Verde local manual
+                        
+                        # Etiqueta de la flecha con indicación visual directa
+                        str_arista = f"{{ from: '{id_nodo}', to: '{id_dest}', label: '{c_local} ➡ {c_d}', dashes: true, font: {{align: 'middle', size: 11, color: '{color_arista}', background: '#161b22'}}, arrows: 'to', color: {{ color: '{color_arista}', highlight: '#ffffff' }} }}"
+                        
+                        if str_arista not in aristas_set:
+                            aristas_js.append(str_arista)
+                            aristas_set.add(str_arista)
+
+        if not nodos_dict:
+            self.log_global("❌ No se encontraron datos para generar el mapa.")
+            self.after(0, lambda: self.btn_mapa_visual.configure(state="normal", text="🗺️ Mapa Visual"))
+            return
+
+        # ==========================================
+        # RENDERIZADO HTML FINAL CON FÍSICA
+        # ==========================================
+        nodos_js = []
+        for id_nodo, datos in nodos_dict.items():
+            cols_str = "\\n".join(sorted(list(datos["columnas"]))) if datos["columnas"] else "<i>Sin relaciones</i>"
+            sub_label = f"BD: {datos['db']}" if alcance in ["SERVIDOR", "BD"] else f"Srv: {datos['srv']} | BD: {datos['db']}"
+            
+            label_html = f"<b>{datos['tabla']}</b>\\n<i>{sub_label}</i>\\n────────────────\\n{cols_str}"
+            
+            nodos_js.append(
+                f"{{ id: '{id_nodo}', label: `{label_html}`, shape: 'box', margin: 12, "
+                f"widthConstraint: {{ minimum: 180, maximum: 300 }}, "
+                f"color: {{ background: '#2b2b2b', border: '{datos['color']}', highlight: {{ border: '#ffffff', background: '#3b3b3b' }} }}, "
+                f"font: {{ multi: 'html', color: '#ffffff', face: 'Consolas', align: 'left', size: 12 }} }}"
+            )
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+            <meta charset="UTF-8">
+            <title>Diagrama ER - Alcance {alcance}</title>
+            <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+            <style>
+                body {{ margin: 0; padding: 0; background-color: #161b22; background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 20px 20px; font-family: 'Segoe UI', Tahoma, sans-serif; color: white; overflow: hidden; }}
+                #panel-control {{ position: absolute; top: 15px; left: 20px; z-index: 10; background: rgba(13, 17, 23, 0.95); padding: 15px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5); width: 320px; }}
+                h2 {{ margin: 0 0 5px 0; font-size: 16px; color: #f0f6fc; }}
+                p {{ font-size: 11px; color: #8b949e; margin-bottom: 12px; }}
+                input[type="text"] {{ width: 100%; padding: 8px; margin-bottom: 10px; background: #0d1117; border: 1px solid #30363d; color: white; border-radius: 4px; box-sizing: border-box; }}
+                button {{ width: 100%; padding: 8px; background: #238636; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+                button:hover {{ background: #2ea043; }}
+                .leyenda {{ display: flex; align-items: center; font-size: 11px; margin-top: 5px; }}
+                .color-box {{ width: 12px; height: 12px; margin-right: 8px; border-radius: 2px; }}
+                #mynetwork {{ width: 100vw; height: 100vh; }}
+                #loading {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 24px; color: #38bdf8; font-weight: bold; z-index: 5; pointer-events: none; }}
+            </style>
+        </head>
+        <body>
+            <div id="panel-control">
+                <h2>🔍 Explorador de Esquema</h2>
+                <p>Nivel: <b>{alcance}</b> {"(Modo En Vivo)" if forzar_recalculo else "(Modo Caché Rápido)"}</p>
+                <p style="color: #38bdf8;">💡 <b>Tip:</b> Arrastra los nodos libremente. Haz <b>doble clic</b> en una tabla para aislar su red.</p>
+                <input type="text" id="buscador" placeholder="Buscar tabla, bd o columna..." onkeyup="if(event.key === 'Enter') buscarNodo()">
+                <button onclick="buscarNodo()">Filtrar / Resaltar</button>
+                <button onclick="resetearFiltro()" style="background: #da3633; margin-top: 5px;">Mostrar Todo</button>
+                
+                <div style="margin-top: 15px; border-top: 1px solid #30363d; padding-top: 10px;">
+                    <div class="leyenda"><div class="color-box" style="background:#e67e22;"></div> Tabla Local</div>
+                    <div class="leyenda"><div class="color-box" style="background:#6f42c1;"></div> Tabla Híbrida (Cross-Server)</div>
+                    <div class="leyenda"><div class="color-box" style="background:#dc3545;"></div> Tabla Externa Fantasma</div>
+                    <hr style="border-color:#30363d;">
+                    <div class="leyenda"><span style="color:#38bdf8; font-weight:bold; margin-right:8px;">───</span> Enlace Nativo (BD)</div>
+                    <div class="leyenda"><span style="color:#10b981; font-weight:bold; margin-right:8px;">- - -</span> Enlace Manual (Local)</div>
+                    <div class="leyenda"><span style="color:#d946ef; font-weight:bold; margin-right:8px;">- - -</span> Enlace Manual (Híbrido)</div>
+                </div>
+            </div>
+            
+            <div id="loading">🚀 Calculando órbitas y constelaciones...</div>
+            <div id="mynetwork"></div>
+
+            <script type="text/javascript">
+                var nodosRAW = [ { ",".join(nodos_js) } ];
+                var aristasRAW = [ { ",".join(aristas_js) } ];
+                
+                var nodes = new vis.DataSet(nodosRAW);
+                var edges = new vis.DataSet(aristasRAW);
+                
+                var network = new vis.Network(document.getElementById('mynetwork'), {{ nodes: nodes, edges: edges }}, {{
+                    edges: {{ smooth: {{ type: 'continuous' }}, width: 2 }},
+                    layout: {{ hierarchical: false }},
+                    physics: {{ 
+                        enabled: true,
+                        repulsion: {{ centralGravity: 0.05, springLength: 300, springConstant: 0.01, nodeDistance: 350, damping: 0.09 }},
+                        solver: 'repulsion',
+                        stabilization: {{ iterations: 400 }}
+                    }},
+                    interaction: {{ hover: true, navigationButtons: true, keyboard: true, dragNodes: true }}
+                }});
+
+                network.on("stabilizationIterationsDone", function () {{
+                    document.getElementById("loading").style.display = "none";
+                    network.setOptions( {{ physics: false }} );
+                    network.fit({{ animation: {{ duration: 1000, easingFunction: 'easeInOutQuad' }} }});
+                }});
+
+                network.on("doubleClick", function (params) {{
+                    if (params.nodes.length > 0) {{
+                        var selectedNode = params.nodes[0];
+                        var connected = new Set([selectedNode]);
+                        var queue = [selectedNode];
+                        
+                        while(queue.length > 0) {{
+                            var curr = queue.shift();
+                            var neighbors = network.getConnectedNodes(curr);
+                            neighbors.forEach(n => {{
+                                if(!connected.has(n)) {{
+                                    connected.add(n);
+                                    queue.push(n);
+                                }}
+                            }});
+                        }}
+
+                        var updates = nodes.get().map(n => {{ return {{ id: n.id, hidden: !connected.has(n.id) }}; }});
+                        nodes.update(updates);
+                        network.fit({{ nodes: Array.from(connected), animation: {{ duration: 800, easingFunction: 'easeInOutQuad' }} }});
+                    }}
+                }});
+
+                network.on("click", function (params) {{
+                    if (params.nodes.length === 0 && params.edges.length === 0) {{ resetearFiltro(); }}
+                }});
+
+                function buscarNodo() {{
+                    var texto = document.getElementById("buscador").value.toLowerCase();
+                    if (!texto) return resetearFiltro();
+                    var actualizados = nodes.get().map(n => {{ return {{ id: n.id, hidden: !(n.id.toLowerCase().includes(texto) || n.label.toLowerCase().includes(texto)) }}; }});
+                    nodes.update(actualizados);
+                }}
+
+                function resetearFiltro() {{
+                    document.getElementById("buscador").value = "";
+                    nodes.update(nodosRAW.map(n => ({{ id: n.id, hidden: false }})));
+                    network.fit({{ animation: {{ duration: 800, easingFunction: 'easeInOutQuad' }} }});
+                }}
+            </script>
+        </body>
+        </html>
+        """
+
+        try:
+            if not os.path.exists("logs"): os.makedirs("logs")
+            from datetime import datetime
+            ruta_html = os.path.abspath(os.path.join("logs", f"ER_{alcance}_{datetime.now().strftime('%H%M%S')}.html"))
+            with open(ruta_html, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            
+            import webbrowser
+            webbrowser.open(f"file://{ruta_html}")
+            self.log_global(f"🗺️ Mapa generado ({len(nodos_dict)} tablas).")
+        except Exception as e:
+            self.log_global(f"❌ Error generando archivo HTML: {e}")
+        finally:
+            self.after(0, lambda: self.btn_mapa_visual.configure(state="normal", text="🗺️ Mapa Visual"))
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     app = AplicacionCargas()
