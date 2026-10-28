@@ -4033,35 +4033,70 @@ class AplicacionCargas(ctk.CTk):
             <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
             <style>
                 body {{ margin: 0; padding: 0; background-color: #161b22; background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 20px 20px; font-family: 'Segoe UI', Tahoma, sans-serif; color: white; overflow: hidden; }}
-                #panel-control {{ position: absolute; top: 15px; left: 20px; z-index: 10; background: rgba(13, 17, 23, 0.95); padding: 15px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5); width: 320px; }}
+                
+                #panel-wrapper {{ position: absolute; top: 20px; left: 0px; z-index: 10; display: flex; align-items: stretch; transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.4s; }}
+                #panel-control {{ background: rgba(13, 17, 23, 0.95); padding: 15px 20px; border-radius: 0 8px 8px 0; border: 1px solid #30363d; border-left: none; box-shadow: 4px 4px 12px rgba(0,0,0,0.5); width: 320px; box-sizing: border-box; }}
+                #panel-tab {{ background: rgba(13, 17, 23, 0.95); border: 1px solid #30363d; border-left: none; padding: 0 10px; border-radius: 0 8px 8px 0; cursor: pointer; color: #38bdf8; font-size: 16px; display: flex; align-items: center; justify-content: center; box-shadow: 4px 4px 12px rgba(0,0,0,0.5); transition: background 0.2s; user-select: none; }}
+                #panel-tab:hover {{ background: #1f2937; }}
+                
+                .panel-oculto {{ transform: translateX(calc(-100% + 35px)); opacity: 0.5; }}
+                .panel-oculto:hover {{ opacity: 0.95; }} 
+                
                 h2 {{ margin: 0 0 5px 0; font-size: 16px; color: #f0f6fc; }}
                 p {{ font-size: 11px; color: #8b949e; margin-bottom: 12px; }}
-                input[type="text"] {{ width: 100%; padding: 8px; margin-bottom: 10px; background: #0d1117; border: 1px solid #30363d; color: white; border-radius: 4px; box-sizing: border-box; }}
-                button {{ width: 100%; padding: 8px; background: #238636; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+                input[type="text"] {{ width: 100%; padding: 8px; margin-bottom: 10px; background: #0d1117; border: 1px solid #30363d; color: white; border-radius: 4px; box-sizing: border-box; outline: none; }}
+                input[type="text"]:focus {{ border-color: #38bdf8; }}
+                
+                button {{ padding: 8px; background: #238636; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; transition: background 0.2s; }}
                 button:hover {{ background: #2ea043; }}
+                
+                /* ESTILOS DEL NUEVO NAVEGADOR DE RESULTADOS */
+                #nav-resultados {{ display: none; align-items: center; justify-content: space-between; margin-bottom: 10px; background: #0d1117; padding: 5px; border-radius: 4px; border: 1px solid #30363d; }}
+                #nav-resultados button {{ background: #343a40; padding: 4px 12px; font-size: 12px; }}
+                #nav-resultados button:hover {{ background: #495057; }}
+                #lblCounter {{ font-size: 12px; font-weight: bold; color: #38bdf8; }}
+                
                 .leyenda {{ display: flex; align-items: center; font-size: 11px; margin-top: 5px; }}
                 .color-box {{ width: 12px; height: 12px; margin-right: 8px; border-radius: 2px; }}
-                #mynetwork {{ width: 100vw; height: 100vh; }}
-                #loading {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 24px; color: #38bdf8; font-weight: bold; z-index: 5; pointer-events: none; }}
+                #mynetwork {{ width: 100vw; height: 100vh; outline: none; }}
+                #loading {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 24px; color: #38bdf8; font-weight: bold; z-index: 5; pointer-events: none; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }}
             </style>
         </head>
         <body>
-            <div id="panel-control">
-                <h2>🔍 Explorador de Esquema</h2>
-                <p>Nivel: <b>{alcance}</b> {"(Modo En Vivo)" if forzar_recalculo else "(Modo Caché Rápido)"}</p>
-                <p style="color: #38bdf8;">💡 <b>Tip:</b> Arrastra los nodos libremente. Haz <b>doble clic</b> en una tabla para aislar su red.</p>
-                <input type="text" id="buscador" placeholder="Buscar tabla, bd o columna..." onkeyup="if(event.key === 'Enter') buscarNodo()">
-                <button onclick="buscarNodo()">Filtrar / Resaltar</button>
-                <button onclick="resetearFiltro()" style="background: #da3633; margin-top: 5px;">Mostrar Todo</button>
-                
-                <div style="margin-top: 15px; border-top: 1px solid #30363d; padding-top: 10px;">
-                    <div class="leyenda"><div class="color-box" style="background:#e67e22;"></div> Tabla Local</div>
-                    <div class="leyenda"><div class="color-box" style="background:#6f42c1;"></div> Tabla Híbrida (Cross-Server)</div>
-                    <div class="leyenda"><div class="color-box" style="background:#dc3545;"></div> Tabla Externa Fantasma</div>
-                    <hr style="border-color:#30363d;">
-                    <div class="leyenda"><span style="color:#38bdf8; font-weight:bold; margin-right:8px;">───</span> Enlace Nativo (BD)</div>
-                    <div class="leyenda"><span style="color:#10b981; font-weight:bold; margin-right:8px;">- - -</span> Enlace Manual (Local)</div>
-                    <div class="leyenda"><span style="color:#d946ef; font-weight:bold; margin-right:8px;">- - -</span> Enlace Manual (Híbrido)</div>
+            <div id="panel-wrapper">
+                <div id="panel-control">
+                    <h2>🔍 Explorador de Esquema</h2>
+                    <p>Nivel: <b>{alcance}</b> {"(Modo En Vivo)" if forzar_recalculo else "(Modo Caché Rápido)"}</p>
+                    <p style="color: #38bdf8;">💡 <b>Tip:</b> Arrastra los nodos libremente. Haz <b>doble clic</b> en una tabla para aislar su red, o <b>doble clic en el fondo</b> para alejar la cámara.</p>
+                    
+                    <div style="display: flex; gap: 5px; margin-bottom: 5px;">
+                        <input type="text" id="buscador" placeholder="Buscar tabla o columna..." onkeyup="if(event.key === 'Enter') buscarNodo()">
+                    </div>
+                    
+                    <!-- NUEVO: CONTROLES DE NAVEGACIÓN DE RESULTADOS -->
+                    <div id="nav-resultados">
+                        <button onclick="prevMatch()" title="Resultado anterior">◀</button>
+                        <span id="lblCounter">0 de 0</span>
+                        <button onclick="nextMatch()" title="Siguiente resultado">▶</button>
+                    </div>
+
+                    <div style="display: flex; gap: 5px;">
+                        <button onclick="buscarNodo()" style="flex: 1;">🔍 Buscar</button>
+                        <button onclick="resetearFiltro()" style="background: #da3633; flex: 1;">Mostrar Todo</button>
+                    </div>
+                    
+                    <div style="margin-top: 15px; border-top: 1px solid #30363d; padding-top: 10px;">
+                        <div class="leyenda"><div class="color-box" style="background:#e67e22;"></div> Tabla Local</div>
+                        <div class="leyenda"><div class="color-box" style="background:#6f42c1;"></div> Tabla Híbrida (Cross-Server)</div>
+                        <div class="leyenda"><div class="color-box" style="background:#dc3545;"></div> Tabla Externa Fantasma</div>
+                        <hr style="border-color:#30363d; margin: 10px 0;">
+                        <div class="leyenda"><span style="color:#38bdf8; font-weight:bold; margin-right:8px;">───</span> Enlace Nativo (BD)</div>
+                        <div class="leyenda"><span style="color:#10b981; font-weight:bold; margin-right:8px;">- - -</span> Enlace Manual (Local)</div>
+                        <div class="leyenda"><span style="color:#d946ef; font-weight:bold; margin-right:8px;">- - -</span> Enlace Manual (Híbrido)</div>
+                    </div>
+                </div>
+                <div id="panel-tab" onclick="togglePanel()" title="Ocultar/Mostrar Panel">
+                    <span id="tab-icon">◀</span>
                 </div>
             </div>
             
@@ -4075,8 +4110,16 @@ class AplicacionCargas(ctk.CTk):
                 var nodes = new vis.DataSet(nodosRAW);
                 var edges = new vis.DataSet(aristasRAW);
                 
+                // VARIABLES PARA EL BUSCADOR AVANZADO
+                var searchResults = [];
+                var currentSearchIndex = -1;
+                
                 var network = new vis.Network(document.getElementById('mynetwork'), {{ nodes: nodes, edges: edges }}, {{
-                    edges: {{ smooth: {{ type: 'continuous' }}, width: 2 }},
+                    edges: {{ 
+                        // SOLUCIÓN A LÍNEAS EMPALMADAS: 'dynamic' curva automáticamente los enlaces duplicados
+                        smooth: {{ type: 'dynamic' }}, 
+                        width: 2 
+                    }},
                     layout: {{ hierarchical: false }},
                     physics: {{ 
                         enabled: true,
@@ -4103,32 +4146,89 @@ class AplicacionCargas(ctk.CTk):
                             var curr = queue.shift();
                             var neighbors = network.getConnectedNodes(curr);
                             neighbors.forEach(n => {{
-                                if(!connected.has(n)) {{
-                                    connected.add(n);
-                                    queue.push(n);
-                                }}
+                                if(!connected.has(n)) {{ connected.add(n); queue.push(n); }}
                             }});
                         }}
 
                         var updates = nodes.get().map(n => {{ return {{ id: n.id, hidden: !connected.has(n.id) }}; }});
                         nodes.update(updates);
                         network.fit({{ nodes: Array.from(connected), animation: {{ duration: 800, easingFunction: 'easeInOutQuad' }} }});
+                    }} else {{
+                        resetearFiltro();
                     }}
                 }});
 
-                network.on("click", function (params) {{
-                    if (params.nodes.length === 0 && params.edges.length === 0) {{ resetearFiltro(); }}
-                }});
+                function togglePanel() {{
+                    var panel = document.getElementById("panel-wrapper");
+                    var icon = document.getElementById("tab-icon");
+                    panel.classList.toggle("panel-oculto");
+                    if (panel.classList.contains("panel-oculto")) {{
+                        icon.innerHTML = "▶";
+                    }} else {{
+                        icon.innerHTML = "◀";
+                    }}
+                }}
 
+                // --- NUEVA LÓGICA DE BÚSQUEDA Y NAVEGACIÓN ---
                 function buscarNodo() {{
                     var texto = document.getElementById("buscador").value.toLowerCase();
                     if (!texto) return resetearFiltro();
-                    var actualizados = nodes.get().map(n => {{ return {{ id: n.id, hidden: !(n.id.toLowerCase().includes(texto) || n.label.toLowerCase().includes(texto)) }}; }});
+                    
+                    searchResults = [];
+                    var actualizados = nodosRAW.map(n => {{
+                        var isMatch = n.id.toLowerCase().includes(texto) || n.label.toLowerCase().includes(texto);
+                        if (isMatch) searchResults.push(n.id);
+                        return {{ id: n.id, hidden: !isMatch }};
+                    }});
+                    
                     nodes.update(actualizados);
+                    
+                    if(searchResults.length > 0) {{
+                        document.getElementById("nav-resultados").style.display = "flex";
+                        currentSearchIndex = 0;
+                        enfocarResultadoActual();
+                    }} else {{
+                        document.getElementById("nav-resultados").style.display = "flex";
+                        document.getElementById("lblCounter").innerText = "0 de 0";
+                    }}
+                }}
+
+                function enfocarResultadoActual() {{
+                    if(searchResults.length === 0) return;
+                    var nodeId = searchResults[currentSearchIndex];
+                    
+                    // Actualizar el contador de la UI
+                    document.getElementById("lblCounter").innerText = (currentSearchIndex + 1) + " de " + searchResults.length;
+                    
+                    // Seleccionar visualmente el nodo actual
+                    network.selectNodes([nodeId]);
+                    
+                    // Viajar con la cámara hacia ese nodo en específico
+                    network.focus(nodeId, {{
+                        scale: 1.1,
+                        animation: {{ duration: 700, easingFunction: 'easeInOutQuad' }}
+                    }});
+                }}
+
+                function prevMatch() {{
+                    if(searchResults.length > 0) {{
+                        currentSearchIndex = (currentSearchIndex - 1 + searchResults.length) % searchResults.length;
+                        enfocarResultadoActual();
+                    }}
+                }}
+                
+                function nextMatch() {{
+                    if(searchResults.length > 0) {{
+                        currentSearchIndex = (currentSearchIndex + 1) % searchResults.length;
+                        enfocarResultadoActual();
+                    }}
                 }}
 
                 function resetearFiltro() {{
                     document.getElementById("buscador").value = "";
+                    document.getElementById("nav-resultados").style.display = "none";
+                    searchResults = [];
+                    
                     nodes.update(nodosRAW.map(n => ({{ id: n.id, hidden: false }})));
                     network.fit({{ animation: {{ duration: 800, easingFunction: 'easeInOutQuad' }} }});
                 }}
